@@ -13,7 +13,7 @@ Heuristics, in priority order (first match wins):
 
   3. If the estimated prompt size exceeds LOCAL_CONTEXT_LIMIT tokens,
      route to CLOUD.  (Local KV cache won't fit, regardless of the model's
-     theoretical context window.)
+     theoretical context window.)  Tool/function schemas are counted too.
 
   4. If the `model` field contains a "/" (e.g. "anthropic/claude-sonnet-4.5"),
      route to CLOUD.  (Provider-prefixed IDs are OpenRouter's convention.)
@@ -21,8 +21,10 @@ Heuristics, in priority order (first match wins):
   5. Default: LOCAL.
 
 A hard-error fallback is layered on top: if LOCAL is picked and the connection
-is refused, we forward to CLOUD using CLOUD_DEFAULT_MODEL instead.  This is NOT
-a quality-signal fallback — it's only for "local is physically down."
+is refused OR times out, we forward to CLOUD using CLOUD_DEFAULT_MODEL instead.
+This is NOT a quality-signal fallback — it's only for "local is physically down
+or wedged."  It works for streaming requests too, but only before the first
+byte is sent (a partial stream can't be transparently restarted).
 
 Configuration (env vars):
   LOCAL_BASE_URL         e.g. http://mac-mini.tailnet-name.ts.net:7979/v1
@@ -31,6 +33,8 @@ Configuration (env vars):
   LOCAL_MODELS           comma-separated, e.g. "qwen3.6-35b-a3b,qwen3-30b-a3b"
   LOCAL_CONTEXT_LIMIT    default 60000 (tokens; ~240k chars)
   CLOUD_DEFAULT_MODEL    default anthropic/claude-sonnet-4.5
+  LOCAL_CONNECT_TIMEOUT  default 5 (seconds; how fast "local is down" fails over)
+  ROUTER_QUIET           set to "1" to silence per-request routing logs
 
 Run:
   pip install fastapi uvicorn httpx
@@ -57,12 +61,37 @@ LOCAL_MODELS = {
 }
 LOCAL_CONTEXT_LIMIT = int(os.environ.get("LOCAL_CONTEXT_LIMIT", "60000"))
 CLOUD_DEFAULT_MODEL = os.environ.get("CLOUD_DEFAULT_MODEL", "anthropic/claude-sonnet-4.5")
+LOCAL_CONNECT_TIMEOUT = float(os.environ.get("LOCAL_CONNECT_TIMEOUT", "5"))
+QUIET = os.environ.get("ROUTER_QUIET", "") == "1"
+
+# A long overall timeout (slow local generation is normal) but a SHORT connect
+# timeout, so "local is down/wedged" fails over to cloud in seconds instead of
+# hanging for the full read window.
+TIMEOUT = httpx.Timeout(300.0, connect=LOCAL_CONNECT_TIMEOUT)
+
+# Transport-level failures that should trigger the local->cloud fallback.
+FALLBACK_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadError,
+    httpx.ReadTimeout,
+    httpx.PoolTimeout,
+)
 
 app = FastAPI()
 
 
+def log(msg: str) -> None:
+    if not QUIET:
+        print(msg)
+
+
 def estimate_prompt_tokens(body: dict[str, Any]) -> int:
-    """~4 chars per token is a good English approximation; fine for threshold gating."""
+    """~4 chars per token is a good English approximation; fine for threshold gating.
+
+    Counts message content AND tool/function/system schemas — agentic clients
+    (OpenCode) send large tool definitions that can dominate the real prompt size.
+    """
     total = 0
     for m in body.get("messages", []):
         content = m.get("content")
@@ -72,6 +101,9 @@ def estimate_prompt_tokens(body: dict[str, Any]) -> int:
             for part in content:
                 if isinstance(part, dict) and part.get("type") == "text":
                     total += len(part.get("text", ""))
+    for key in ("tools", "functions"):
+        if key in body:
+            total += len(json.dumps(body[key]))
     return total // 4
 
 
@@ -100,36 +132,77 @@ def pick_target(body: dict[str, Any], quality_header: str | None) -> tuple[str, 
     return LOCAL_BASE_URL, model, "default-local"
 
 
-async def forward(base_url: str, path: str, body: bytes, client_headers: dict[str, str], stream: bool):
-    target = f"{base_url}{path}"
-    fwd_headers = {
+def _headers_for(url: str, client_headers: dict[str, str]) -> dict[str, str]:
+    h = {
         k: v for k, v in client_headers.items()
         if k.lower() not in {"host", "authorization", "content-length", "accept-encoding"}
     }
-    if base_url == CLOUD_BASE_URL and OPENROUTER_API_KEY:
-        fwd_headers["Authorization"] = f"Bearer {OPENROUTER_API_KEY}"
+    if url == CLOUD_BASE_URL and OPENROUTER_API_KEY:
+        h["Authorization"] = f"Bearer {OPENROUTER_API_KEY}"
+    return h
 
-    client = httpx.AsyncClient(timeout=300.0)
+
+async def forward(
+    primary_url: str,
+    path: str,
+    primary_body: bytes,
+    client_headers: dict[str, str],
+    stream: bool,
+    fallback_url: str | None = None,
+    fallback_body: bytes | None = None,
+):
+    """Forward to primary_url; on a transport failure, transparently retry against
+    fallback_url (if given). For streaming, the fallback only applies before the
+    first byte has been yielded — a partially-sent stream cannot be restarted."""
 
     if stream:
         async def streamer():
+            client = httpx.AsyncClient(timeout=TIMEOUT)
             try:
-                async with client.stream("POST", target, content=body, headers=fwd_headers) as resp:
-                    async for chunk in resp.aiter_raw():
-                        yield chunk
+                url, body = primary_url, primary_body
+                can_fallback = fallback_url is not None
+                while True:
+                    yielded = False
+                    try:
+                        async with client.stream(
+                            "POST", f"{url}{path}", content=body,
+                            headers=_headers_for(url, client_headers),
+                        ) as resp:
+                            async for chunk in resp.aiter_raw():
+                                yielded = True
+                                yield chunk
+                        return
+                    except FALLBACK_ERRORS:
+                        if can_fallback and not yielded:
+                            log(f"[router] stream: {url} unreachable pre-first-byte, "
+                                f"falling back to cloud/{CLOUD_DEFAULT_MODEL}")
+                            url, body = fallback_url, fallback_body  # type: ignore[assignment]
+                            can_fallback = False
+                            continue
+                        raise
             finally:
                 await client.aclose()
         return StreamingResponse(streamer(), media_type="text/event-stream")
 
-    try:
-        resp = await client.post(target, content=body, headers=fwd_headers)
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        try:
+            resp = await client.post(
+                f"{primary_url}{path}", content=primary_body,
+                headers=_headers_for(primary_url, client_headers),
+            )
+        except FALLBACK_ERRORS:
+            if fallback_url is None:
+                raise
+            log(f"[router] {primary_url} unreachable, falling back to cloud/{CLOUD_DEFAULT_MODEL}")
+            resp = await client.post(
+                f"{fallback_url}{path}", content=fallback_body,
+                headers=_headers_for(fallback_url, client_headers),
+            )
         return Response(
             content=resp.content,
             status_code=resp.status_code,
             media_type=resp.headers.get("content-type", "application/json"),
         )
-    finally:
-        await client.aclose()
 
 
 @app.post("/v1/chat/completions")
@@ -140,19 +213,23 @@ async def chat_completions(request: Request, x_quality: str | None = Header(defa
 
     base_url, model_to_send, reason = pick_target(body, x_quality)
     body["model"] = model_to_send
-    new_body = json.dumps(body).encode()
+    primary_body = json.dumps(body).encode()
 
-    print(f"[router] -> {base_url} model={model_to_send} reason={reason}")
+    log(f"[router] -> {base_url} model={model_to_send} reason={reason}")
 
-    try:
-        return await forward(base_url, "/chat/completions", new_body, dict(request.headers), stream)
-    except (httpx.ConnectError, httpx.ReadError):
-        if base_url == LOCAL_BASE_URL:
-            print(f"[router] local unreachable, falling back to cloud/{CLOUD_DEFAULT_MODEL}")
-            body["model"] = CLOUD_DEFAULT_MODEL
-            fallback_body = json.dumps(body).encode()
-            return await forward(CLOUD_BASE_URL, "/chat/completions", fallback_body, dict(request.headers), stream)
-        raise
+    # Only LOCAL gets a cloud fallback (cloud has no further fallback target).
+    fallback_url: str | None = None
+    fallback_body: bytes | None = None
+    if base_url == LOCAL_BASE_URL:
+        fb = dict(body)
+        fb["model"] = CLOUD_DEFAULT_MODEL
+        fallback_url = CLOUD_BASE_URL
+        fallback_body = json.dumps(fb).encode()
+
+    return await forward(
+        base_url, "/chat/completions", primary_body, dict(request.headers), stream,
+        fallback_url=fallback_url, fallback_body=fallback_body,
+    )
 
 
 @app.get("/v1/models")
@@ -166,7 +243,7 @@ async def models():
                 if r.status_code == 200:
                     merged.extend(r.json().get("data", []))
             except Exception as e:
-                print(f"[router] /models fetch from {base} failed: {e}")
+                log(f"[router] /models fetch from {base} failed: {e}")
     return {"object": "list", "data": merged}
 
 
@@ -178,4 +255,5 @@ async def health():
         "cloud": CLOUD_BASE_URL,
         "local_models": sorted(LOCAL_MODELS),
         "local_context_limit": LOCAL_CONTEXT_LIMIT,
+        "local_connect_timeout": LOCAL_CONNECT_TIMEOUT,
     }
