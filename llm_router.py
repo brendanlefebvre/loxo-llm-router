@@ -35,6 +35,9 @@ Configuration (env vars):
   CLOUD_DEFAULT_MODEL    default anthropic/claude-sonnet-4.5
   LOCAL_CONNECT_TIMEOUT  default 5 (seconds; how fast "local is down" fails over)
   ROUTER_QUIET           set to "1" to silence per-request routing logs
+  ROUTER_TOKEN           optional shared secret; if set, clients must send
+                         `Authorization: Bearer <token>` or get 401. Guards the
+                         money-spending cloud path on a multi-client LAN.
 
 Run:
   pip install fastapi uvicorn httpx
@@ -45,6 +48,7 @@ Clients point any OpenAI-compatible SDK at http://<router-host>:9090/v1 .
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 from typing import Any
@@ -63,6 +67,11 @@ LOCAL_CONTEXT_LIMIT = int(os.environ.get("LOCAL_CONTEXT_LIMIT", "60000"))
 CLOUD_DEFAULT_MODEL = os.environ.get("CLOUD_DEFAULT_MODEL", "anthropic/claude-sonnet-4.5")
 LOCAL_CONNECT_TIMEOUT = float(os.environ.get("LOCAL_CONNECT_TIMEOUT", "5"))
 QUIET = os.environ.get("ROUTER_QUIET", "") == "1"
+# Optional shared-secret gate. If set, clients must send `Authorization: Bearer <token>`
+# (e.g. set OpenCode's apiKey to this value). Empty = no auth (current behavior).
+# The router proxies to PAID cloud with your key, so on a multi-client LAN this
+# stops anyone who can reach the port from spending your OpenRouter credits.
+ROUTER_TOKEN = os.environ.get("ROUTER_TOKEN", "")
 
 # A long overall timeout (slow local generation is normal) but a SHORT connect
 # timeout, so "local is down/wedged" fails over to cloud in seconds instead of
@@ -84,6 +93,24 @@ app = FastAPI()
 def log(msg: str) -> None:
     if not QUIET:
         print(msg)
+
+
+def auth_failed(authorization: str | None) -> Response | None:
+    """If ROUTER_TOKEN is set, require a matching bearer token. Returns a 401
+    Response on failure, or None to proceed. Constant-time compare."""
+    if not ROUTER_TOKEN:
+        return None
+    provided = authorization or ""
+    if provided[:7].lower() == "bearer ":
+        provided = provided[7:]
+    if not hmac.compare_digest(provided.strip(), ROUTER_TOKEN):
+        return Response(
+            content='{"error":{"message":"unauthorized: bad or missing router token",'
+                    '"type":"invalid_request_error"}}',
+            status_code=401,
+            media_type="application/json",
+        )
+    return None
 
 
 def estimate_prompt_tokens(body: dict[str, Any]) -> int:
@@ -206,7 +233,15 @@ async def forward(
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: Request, x_quality: str | None = Header(default=None)):
+async def chat_completions(
+    request: Request,
+    x_quality: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    denied = auth_failed(authorization)
+    if denied is not None:
+        return denied
+
     body_bytes = await request.body()
     body = json.loads(body_bytes)
     stream = bool(body.get("stream", False))
@@ -233,7 +268,10 @@ async def chat_completions(request: Request, x_quality: str | None = Header(defa
 
 
 @app.get("/v1/models")
-async def models():
+async def models(authorization: str | None = Header(default=None)):
+    denied = auth_failed(authorization)
+    if denied is not None:
+        return denied
     merged: list[dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=30.0) as client:
         for base, auth in ((LOCAL_BASE_URL, None), (CLOUD_BASE_URL, OPENROUTER_API_KEY)):
