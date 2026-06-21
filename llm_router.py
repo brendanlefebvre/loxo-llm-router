@@ -38,6 +38,13 @@ Configuration (env vars):
   ROUTER_TOKEN           optional shared secret; if set, clients must send
                          `Authorization: Bearer <token>` or get 401. Guards the
                          money-spending cloud path on a multi-client LAN.
+  VISION_SHIM_MODEL      opt-in: a local VLM model id. When set, image content
+                         sent to a text-only target model is transcribed to text
+                         via the VLM first, so e.g. GLM-5.2 can "read" a pasted
+                         screenshot. Unset = images pass through untouched.
+  VISION_SHIM_URL        VLM endpoint for the transcription (default LOCAL_BASE_URL)
+  VISION_CAPABLE_MODELS  comma-separated tags of models that can already see;
+                         the shim is skipped when the target matches one.
 
 Run:
   pip install fastapi uvicorn httpx
@@ -72,6 +79,30 @@ QUIET = os.environ.get("ROUTER_QUIET", "") == "1"
 # The router proxies to PAID cloud with your key, so on a multi-client LAN this
 # stops anyone who can reach the port from spending your OpenRouter credits.
 ROUTER_TOKEN = os.environ.get("ROUTER_TOKEN", "")
+
+# --- Vision shim --------------------------------------------------------------
+# When a request carries image content but the chosen target model is text-only
+# (e.g. GLM-5.2), transcribe each image to text via a local vision model
+# (mlx_vlm) and substitute it in, so the text-only model still "sees" screenshots.
+# OPT-IN: the shim is disabled unless VISION_SHIM_MODEL is set. When unset, the
+# router behaves exactly as before (images pass through untouched).
+#   VISION_SHIM_URL        VLM endpoint for transcription (default: LOCAL_BASE_URL)
+#   VISION_SHIM_MODEL      VLM model id to request (e.g. an mlx_vlm vision model);
+#                          empty = shim OFF
+#   VISION_CAPABLE_MODELS  comma-separated tags of models that can already see;
+#                          if the target matches one, the shim is skipped
+#   VISION_SHIM_PROMPT     the transcription instruction sent to the VLM
+VISION_SHIM_URL = os.environ.get("VISION_SHIM_URL", LOCAL_BASE_URL).rstrip("/")
+VISION_SHIM_MODEL = os.environ.get("VISION_SHIM_MODEL", "")
+VISION_CAPABLE_MODELS = {
+    m.strip() for m in os.environ.get("VISION_CAPABLE_MODELS", "").split(",") if m.strip()
+}
+VISION_SHIM_PROMPT = os.environ.get(
+    "VISION_SHIM_PROMPT",
+    "Transcribe and describe this image in full detail for a text-only coding "
+    "assistant. Include all visible text, code, error messages, file/UI labels, "
+    "and overall layout. Output only the transcription, with no preamble.",
+)
 
 # A long overall timeout (slow local generation is normal) but a SHORT connect
 # timeout, so "local is down/wedged" fails over to cloud in seconds instead of
@@ -138,6 +169,99 @@ def is_local_model(model_name: str) -> bool:
     if not model_name or not LOCAL_MODELS:
         return False
     return any(tag in model_name for tag in LOCAL_MODELS)
+
+
+def is_vision_capable(model_name: str) -> bool:
+    """True if the model is known to handle image input (skip the shim for it)."""
+    if not model_name or not VISION_CAPABLE_MODELS:
+        return False
+    return any(tag in model_name for tag in VISION_CAPABLE_MODELS)
+
+
+def _iter_image_parts(body: dict[str, Any]):
+    """Yield each OpenAI-format `image_url` content part in the request."""
+    for m in body.get("messages", []):
+        content = m.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    yield part
+
+
+def count_images(body: dict[str, Any]) -> int:
+    return sum(1 for _ in _iter_image_parts(body))
+
+
+async def apply_vision_shim(body: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of `body` with every `image_url` part replaced by a text
+    transcription from the local VLM. Degrades gracefully: any image that fails
+    to transcribe is left untouched, and the request is never broken.
+
+    Note: routing (pick_target) runs BEFORE this, on the pre-transcription size,
+    so a very large transcription could in theory overshoot a local context
+    budget. Acceptable for v1; revisit if it bites.
+    """
+    transcribe_prompt = VISION_SHIM_PROMPT
+    new_messages: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        for m in body.get("messages", []):
+            content = m.get("content")
+            if not isinstance(content, list):
+                new_messages.append(m)
+                continue
+            new_content: list[dict[str, Any]] = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    url = (part.get("image_url") or {}).get("url", "")
+                    text = await _transcribe_image(client, url, transcribe_prompt) if url else None
+                    if text:
+                        new_content.append(
+                            {"type": "text", "text": f"[Transcribed image:\n{text}\n]"}
+                        )
+                    else:
+                        new_content.append(part)  # leave as-is on failure
+                else:
+                    new_content.append(part)
+            nm = dict(m)
+            nm["content"] = new_content
+            new_messages.append(nm)
+    nb = dict(body)
+    nb["messages"] = new_messages
+    return nb
+
+
+async def _transcribe_image(
+    client: httpx.AsyncClient, image_url: str, prompt: str
+) -> str | None:
+    """Ask the local VLM to transcribe one image. Returns text, or None on any
+    failure (so the caller leaves the original image part in place)."""
+    payload = {
+        "model": VISION_SHIM_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }
+        ],
+        "stream": False,
+        "temperature": 0,
+    }
+    try:
+        r = await client.post(
+            f"{VISION_SHIM_URL}/chat/completions",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        if r.status_code != 200:
+            log(f"[router] vision-shim: VLM HTTP {r.status_code}; leaving image as-is")
+            return None
+        return r.json()["choices"][0]["message"]["content"]
+    except Exception as e:  # noqa: BLE001 - never break the request over a shim failure
+        log(f"[router] vision-shim: transcription failed ({e}); leaving image as-is")
+        return None
 
 
 def pick_target(body: dict[str, Any], quality_header: str | None) -> tuple[str, str, str]:
@@ -248,6 +372,17 @@ async def chat_completions(
 
     base_url, model_to_send, reason = pick_target(body, x_quality)
     body["model"] = model_to_send
+
+    # Vision shim: if the chosen model is text-only and the request carries
+    # image content, transcribe each image to text via the local VLM so the
+    # text model can still use it. Opt-in (VISION_SHIM_MODEL must be set).
+    if VISION_SHIM_MODEL and not is_vision_capable(model_to_send):
+        n_imgs = count_images(body)
+        if n_imgs:
+            log(f"[router] vision-shim: transcribing {n_imgs} image(s) -> text "
+                f"for text-only model {model_to_send}")
+            body = await apply_vision_shim(body)
+
     primary_body = json.dumps(body).encode()
 
     log(f"[router] -> {base_url} model={model_to_send} reason={reason}")
@@ -294,4 +429,10 @@ async def health():
         "local_models": sorted(LOCAL_MODELS),
         "local_context_limit": LOCAL_CONTEXT_LIMIT,
         "local_connect_timeout": LOCAL_CONNECT_TIMEOUT,
+        "vision_shim": {
+            "enabled": bool(VISION_SHIM_MODEL),
+            "url": VISION_SHIM_URL,
+            "model": VISION_SHIM_MODEL,
+            "vision_capable_models": sorted(VISION_CAPABLE_MODELS),
+        },
     }
