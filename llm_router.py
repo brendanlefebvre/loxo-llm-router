@@ -44,7 +44,14 @@ Configuration (env vars):
                          screenshot. Unset = images pass through untouched.
   VISION_SHIM_URL        VLM endpoint for the transcription (default LOCAL_BASE_URL)
   VISION_CAPABLE_MODELS  comma-separated tags of models that can already see;
-                         the shim is skipped when the target matches one.
+                         the policy is skipped when the target matches one.
+  VISION_MODE            default vision policy for image+text-only-model requests:
+                         "auto" (OCR locally, escalate to cloud if OCR is thin),
+                         "local" (OCR only), or "cloud" (always reroute to cloud).
+                         Overridden per-request by the `x-vision` header.
+  VISION_CLOUD_MODEL     multimodal cloud model to reroute image requests to in
+                         cloud/auto-escalation modes (e.g. anthropic/claude-...).
+  VISION_OCR_MIN_CHARS   auto-mode threshold; OCR shorter than this escalates.
 
 Run:
   pip install fastapi uvicorn httpx
@@ -103,6 +110,20 @@ VISION_SHIM_PROMPT = os.environ.get(
     "assistant. Include all visible text, code, error messages, file/UI labels, "
     "and overall layout. Output only the transcription, with no preamble.",
 )
+
+# Vision routing policy (applied when an image hits a text-only target model):
+#   VISION_MODE          default policy: "auto" | "local" | "cloud".
+#                        Per-request `x-vision` header overrides it.
+#                          local = OCR the image locally, feed text to the text model
+#                          cloud = reroute the whole request to a multimodal cloud model
+#                          auto  = OCR locally; if the transcription is thin (likely a
+#                                  non-text image), escalate to cloud vision
+#   VISION_CLOUD_MODEL   multimodal cloud model to reroute to (e.g.
+#                        "anthropic/claude-sonnet-4.5"); empty = cloud vision disabled
+#   VISION_OCR_MIN_CHARS auto-mode threshold: OCR shorter than this escalates to cloud
+VISION_MODE = os.environ.get("VISION_MODE", "auto").strip().lower()
+VISION_CLOUD_MODEL = os.environ.get("VISION_CLOUD_MODEL", "")
+VISION_OCR_MIN_CHARS = int(os.environ.get("VISION_OCR_MIN_CHARS", "40"))
 
 # A long overall timeout (slow local generation is normal) but a SHORT connect
 # timeout, so "local is down/wedged" fails over to cloud in seconds instead of
@@ -192,10 +213,12 @@ def count_images(body: dict[str, Any]) -> int:
     return sum(1 for _ in _iter_image_parts(body))
 
 
-async def apply_vision_shim(body: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of `body` with every `image_url` part replaced by a text
-    transcription from the local VLM. Degrades gracefully: any image that fails
-    to transcribe is left untouched, and the request is never broken.
+async def apply_vision_shim(body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Return (new_body, total_transcribed_chars). Every `image_url` part is
+    replaced by a text transcription from the local VLM; the char count lets
+    `auto` mode decide whether the OCR was rich enough or should escalate to
+    cloud vision. Degrades gracefully: any image that fails to transcribe is
+    left untouched, and the request is never broken.
 
     Note: routing (pick_target) runs BEFORE this, on the pre-transcription size,
     so a very large transcription could in theory overshoot a local context
@@ -203,6 +226,7 @@ async def apply_vision_shim(body: dict[str, Any]) -> dict[str, Any]:
     """
     transcribe_prompt = VISION_SHIM_PROMPT
     new_messages: list[dict[str, Any]] = []
+    total_chars = 0
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         for m in body.get("messages", []):
             content = m.get("content")
@@ -215,6 +239,7 @@ async def apply_vision_shim(body: dict[str, Any]) -> dict[str, Any]:
                     url = (part.get("image_url") or {}).get("url", "")
                     text = await _transcribe_image(client, url, transcribe_prompt) if url else None
                     if text:
+                        total_chars += len(text)
                         new_content.append(
                             {"type": "text", "text": f"[Transcribed image:\n{text}\n]"}
                         )
@@ -227,7 +252,7 @@ async def apply_vision_shim(body: dict[str, Any]) -> dict[str, Any]:
             new_messages.append(nm)
     nb = dict(body)
     nb["messages"] = new_messages
-    return nb
+    return nb, total_chars
 
 
 async def _transcribe_image(
@@ -262,6 +287,65 @@ async def _transcribe_image(
     except Exception as e:  # noqa: BLE001 - never break the request over a shim failure
         log(f"[router] vision-shim: transcription failed ({e}); leaving image as-is")
         return None
+
+
+async def apply_vision_policy(
+    body: dict[str, Any],
+    base_url: str,
+    model_to_send: str,
+    reason: str,
+    x_vision: str | None,
+) -> tuple[str, str, dict[str, Any], str]:
+    """Decide how to handle image content when the target model is text-only.
+
+    Modes (the `x-vision` request header overrides the VISION_MODE default):
+      local - OCR each image locally (mlx_vlm), feed the text to the text model
+      cloud - reroute the whole request to VISION_CLOUD_MODEL (a multimodal cloud
+              model) with the images left intact, so it sees and answers
+      auto  - OCR locally; if the transcription is thin (< VISION_OCR_MIN_CHARS,
+              i.e. probably a non-text image) escalate to cloud vision, else use
+              the local OCR text
+
+    Returns (base_url, model_to_send, body, reason) - possibly rerouted to cloud.
+    No-op when the target already sees, there are no images, or nothing's configured.
+    """
+    if is_vision_capable(model_to_send):
+        return base_url, model_to_send, body, reason
+    if not count_images(body):
+        return base_url, model_to_send, body, reason
+    if not (VISION_SHIM_MODEL or VISION_CLOUD_MODEL):
+        return base_url, model_to_send, body, reason
+
+    mode = (x_vision or VISION_MODE or "auto").strip().lower()
+    if mode not in {"local", "cloud", "auto"}:
+        mode = "auto"
+
+    def _reroute_to_cloud(why: str) -> tuple[str, str, dict[str, Any], str]:
+        b = dict(body)
+        b["model"] = VISION_CLOUD_MODEL
+        log(f"[router] vision={why}: reroute image request -> cloud/{VISION_CLOUD_MODEL}")
+        return CLOUD_BASE_URL, VISION_CLOUD_MODEL, b, f"vision-{why}"
+
+    # Explicit cloud, or auto/local with no local OCR model configured -> full reroute.
+    if mode == "cloud" or not VISION_SHIM_MODEL:
+        if VISION_CLOUD_MODEL:
+            return _reroute_to_cloud("cloud")
+        log("[router] vision=cloud requested but VISION_CLOUD_MODEL unset; image passes through")
+        return base_url, model_to_send, body, reason
+
+    # local or auto, with a local OCR model available -> OCR first.
+    shimmed, n_chars = await apply_vision_shim(body)
+
+    if mode == "local":
+        log(f"[router] vision=local: OCR'd image(s) -> {n_chars} chars for {model_to_send}")
+        return base_url, model_to_send, shimmed, f"{reason}+vision-local"
+
+    # auto: rich OCR -> keep local text; thin OCR -> escalate to cloud (if configured).
+    if n_chars >= VISION_OCR_MIN_CHARS or not VISION_CLOUD_MODEL:
+        log(f"[router] vision=auto: OCR {n_chars} chars -> local text for {model_to_send}")
+        return base_url, model_to_send, shimmed, f"{reason}+vision-auto-local"
+    log(f"[router] vision=auto: OCR thin ({n_chars} < {VISION_OCR_MIN_CHARS}) -> escalating to cloud")
+    return _reroute_to_cloud("auto-escalated")
 
 
 def pick_target(body: dict[str, Any], quality_header: str | None) -> tuple[str, str, str]:
@@ -360,6 +444,7 @@ async def forward(
 async def chat_completions(
     request: Request,
     x_quality: str | None = Header(default=None),
+    x_vision: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ):
     denied = auth_failed(authorization)
@@ -373,15 +458,12 @@ async def chat_completions(
     base_url, model_to_send, reason = pick_target(body, x_quality)
     body["model"] = model_to_send
 
-    # Vision shim: if the chosen model is text-only and the request carries
-    # image content, transcribe each image to text via the local VLM so the
-    # text model can still use it. Opt-in (VISION_SHIM_MODEL must be set).
-    if VISION_SHIM_MODEL and not is_vision_capable(model_to_send):
-        n_imgs = count_images(body)
-        if n_imgs:
-            log(f"[router] vision-shim: transcribing {n_imgs} image(s) -> text "
-                f"for text-only model {model_to_send}")
-            body = await apply_vision_shim(body)
+    # Vision policy: when an image hits a text-only target model, handle it per
+    # the local/cloud/auto policy (may reroute to a multimodal cloud model).
+    # No-op unless configured; see apply_vision_policy.
+    base_url, model_to_send, body, reason = await apply_vision_policy(
+        body, base_url, model_to_send, reason, x_vision
+    )
 
     primary_body = json.dumps(body).encode()
 
@@ -429,10 +511,13 @@ async def health():
         "local_models": sorted(LOCAL_MODELS),
         "local_context_limit": LOCAL_CONTEXT_LIMIT,
         "local_connect_timeout": LOCAL_CONNECT_TIMEOUT,
-        "vision_shim": {
-            "enabled": bool(VISION_SHIM_MODEL),
-            "url": VISION_SHIM_URL,
-            "model": VISION_SHIM_MODEL,
+        "vision": {
+            "enabled": bool(VISION_SHIM_MODEL or VISION_CLOUD_MODEL),
+            "mode": VISION_MODE,
+            "local_ocr_model": VISION_SHIM_MODEL,
+            "local_ocr_url": VISION_SHIM_URL,
+            "cloud_model": VISION_CLOUD_MODEL,
+            "ocr_min_chars": VISION_OCR_MIN_CHARS,
             "vision_capable_models": sorted(VISION_CAPABLE_MODELS),
         },
     }
