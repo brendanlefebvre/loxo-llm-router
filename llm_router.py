@@ -827,12 +827,25 @@ async def chat_completions(
     )
 
 
+def _virtual_model_entries() -> list[dict[str, Any]]:
+    """Synthesized /v1/models entries advertising the router's virtual models."""
+    return [
+        {
+            "id": vm.id,
+            "object": "model",
+            "owned_by": "airwolf-llm-router",
+            "context_length": vm.advertised_context,
+        }
+        for vm in VIRTUAL_MODELS.values()
+    ]
+
+
 @app.get("/v1/models")
 async def models(authorization: str | None = Header(default=None)):
     denied = auth_failed(authorization)
     if denied is not None:
         return denied
-    merged: list[dict[str, Any]] = []
+    merged: list[dict[str, Any]] = _virtual_model_entries()
     async with httpx.AsyncClient(timeout=30.0) as client:
         for base, auth in ((LOCAL_BASE_URL, None), (CLOUD_BASE_URL, OPENROUTER_API_KEY)):
             try:

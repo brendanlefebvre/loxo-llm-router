@@ -226,3 +226,12 @@ def test_parse_rate_card_missing_fields_are_none():
 
 def test_parse_rate_card_unknown_id_returns_none():
     assert R._parse_rate_card(_SAMPLE_MODELS_PAYLOAD, "nope/nope") is None
+
+
+def test_virtual_model_entries_shape():
+    entries = R._virtual_model_entries()
+    assert any(e["id"] == "airwolf/auto" for e in entries)
+    e = entries[0]
+    assert e["object"] == "model"
+    assert e["owned_by"] == "airwolf-llm-router"
+    assert "context_length" in e
