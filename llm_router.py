@@ -15,7 +15,7 @@ Heuristics, in priority order (first match wins):
      route to CLOUD.  (Local KV cache won't fit, regardless of the model's
      theoretical context window.)  Tool/function schemas are counted too.
 
-  4. If the `model` field contains a "/" (e.g. "anthropic/claude-sonnet-4.5"),
+  4. If the `model` field contains a "/" (e.g. "anthropic/claude-sonnet-4.6"),
      route to CLOUD.  (Provider-prefixed IDs are OpenRouter's convention.)
 
   5. Default: LOCAL.
@@ -32,7 +32,7 @@ Configuration (env vars):
   OPENROUTER_API_KEY     required for cloud traffic
   LOCAL_MODELS           comma-separated, e.g. "qwen3.6-35b-a3b,qwen3-30b-a3b"
   LOCAL_CONTEXT_LIMIT    default 60000 (tokens; ~240k chars)
-  CLOUD_DEFAULT_MODEL    default anthropic/claude-sonnet-4.5
+  CLOUD_DEFAULT_MODEL    default anthropic/claude-sonnet-4.6
   LOCAL_CONNECT_TIMEOUT  default 5 (seconds; how fast "local is down" fails over)
   ROUTER_QUIET           set to "1" to silence per-request routing logs
   ROUTER_TOKEN           optional shared secret; if set, clients must send
@@ -78,7 +78,7 @@ LOCAL_MODELS = {
     m.strip() for m in os.environ.get("LOCAL_MODELS", "").split(",") if m.strip()
 }
 LOCAL_CONTEXT_LIMIT = int(os.environ.get("LOCAL_CONTEXT_LIMIT", "60000"))
-CLOUD_DEFAULT_MODEL = os.environ.get("CLOUD_DEFAULT_MODEL", "anthropic/claude-sonnet-4.5")
+CLOUD_DEFAULT_MODEL = os.environ.get("CLOUD_DEFAULT_MODEL", "anthropic/claude-sonnet-4.6")
 LOCAL_CONNECT_TIMEOUT = float(os.environ.get("LOCAL_CONNECT_TIMEOUT", "5"))
 QUIET = os.environ.get("ROUTER_QUIET", "") == "1"
 # Optional shared-secret gate. If set, clients must send `Authorization: Bearer <token>`
@@ -119,7 +119,7 @@ VISION_SHIM_PROMPT = os.environ.get(
 #                          auto  = OCR locally; if the transcription is thin (likely a
 #                                  non-text image), escalate to cloud vision
 #   VISION_CLOUD_MODEL   multimodal cloud model to reroute to (e.g.
-#                        "anthropic/claude-sonnet-4.5"); empty = cloud vision disabled
+#                        "anthropic/claude-sonnet-4.6"); empty = cloud vision disabled
 #   VISION_OCR_MIN_CHARS auto-mode threshold: OCR shorter than this escalates to cloud
 VISION_MODE = os.environ.get("VISION_MODE", "auto").strip().lower()
 VISION_CLOUD_MODEL = os.environ.get("VISION_CLOUD_MODEL", "")
