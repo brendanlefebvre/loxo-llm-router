@@ -33,6 +33,15 @@ Configuration (env vars):
   LOCAL_MODELS           comma-separated, e.g. "qwen3.6-35b-a3b,qwen3-30b-a3b"
   LOCAL_CONTEXT_LIMIT    default 60000 (tokens; ~240k chars)
   CLOUD_DEFAULT_MODEL    default anthropic/claude-sonnet-4.6
+  AUTO_MODEL_ID          virtual model id clients send (default "airwolf/auto").
+                         Resolved by the router to real upstream models below.
+  AUTO_CLOUD_MODEL       cloud target the virtual model routes to (default
+                         "z-ai/glm-5.2").
+  AUTO_LOCAL_MODEL       local target for the virtual model; unset = first
+                         LOCAL_MODELS entry.
+  RATE_CARD_TTL          seconds before the live rate card is refreshed
+                         (default 86400). Fetch is non-blocking and best-effort.
+  RATE_CARD_URL          pricing source (default OpenRouter /api/v1/models).
   LOCAL_CONNECT_TIMEOUT  default 5 (seconds; how fast "local is down" fails over)
   ROUTER_QUIET           set to "1" to silence per-request routing logs
   ROUTER_TOKEN           optional shared secret; if set, clients must send
