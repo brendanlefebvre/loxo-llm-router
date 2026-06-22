@@ -182,3 +182,16 @@ def test_local_target_for_empty_models_uses_fallback(monkeypatch):
     monkeypatch.setattr(R, "LOCAL_MODELS_ORDER", [])
     vm = R.VirtualModel(id="x", cloud_target="c")
     assert R.local_target_for(vm, "airwolf/auto") == "airwolf/auto"
+
+
+import asyncio
+
+
+def test_vision_policy_disabled_short_circuits():
+    body = {"messages": [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]}]}
+    out = asyncio.run(R.apply_vision_policy(
+        body, R.LOCAL_BASE_URL, "qwen-local", "virtual-local", None, vision_enabled=False
+    ))
+    assert out == (R.LOCAL_BASE_URL, "qwen-local", body, "virtual-local")

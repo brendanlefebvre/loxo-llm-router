@@ -435,6 +435,7 @@ async def apply_vision_policy(
     model_to_send: str,
     reason: str,
     x_vision: str | None,
+    vision_enabled: bool = True,
 ) -> tuple[str, str, dict[str, Any], str]:
     """Decide how to handle image content when the target model is text-only.
 
@@ -449,6 +450,8 @@ async def apply_vision_policy(
     Returns (base_url, model_to_send, body, reason) - possibly rerouted to cloud.
     No-op when the target already sees, there are no images, or nothing's configured.
     """
+    if not vision_enabled:
+        return base_url, model_to_send, body, reason
     if is_vision_capable(model_to_send):
         return base_url, model_to_send, body, reason
     if not count_images(body):
@@ -566,6 +569,7 @@ async def forward(
     cloud_model: str | None = None,
     cloud_provider: str | None = None,
     reason: str = "",
+    fallback_cloud_model: str | None = None,
 ):
     """Forward to primary_url; on a transport failure, transparently retry against
     fallback_url (if given). For streaming, the fallback only applies before the
@@ -613,10 +617,11 @@ async def forward(
                         return
                     except FALLBACK_ERRORS:
                         if can_fallback and not yielded:
+                            fb_model = fallback_cloud_model or CLOUD_DEFAULT_MODEL
                             log(f"[router] stream: {url} unreachable pre-first-byte, "
-                                f"falling back to cloud/{CLOUD_DEFAULT_MODEL}")
+                                f"falling back to cloud/{fb_model}")
                             url, body = fallback_url, fallback_body  # type: ignore[assignment]
-                            served_cloud_model = CLOUD_DEFAULT_MODEL
+                            served_cloud_model = fb_model
                             served_cloud_provider = _provider_host(CLOUD_BASE_URL)
                             served_reason = "fallback"
                             can_fallback = False
@@ -638,12 +643,13 @@ async def forward(
         except FALLBACK_ERRORS:
             if fallback_url is None:
                 raise
-            log(f"[router] {primary_url} unreachable, falling back to cloud/{CLOUD_DEFAULT_MODEL}")
+            fb_model = fallback_cloud_model or CLOUD_DEFAULT_MODEL
+            log(f"[router] {primary_url} unreachable, falling back to cloud/{fb_model}")
             resp = await client.post(
                 f"{fallback_url}{path}", content=fallback_body,
                 headers=_headers_for(fallback_url, client_headers),
             )
-            served_cloud_model = CLOUD_DEFAULT_MODEL
+            served_cloud_model = fb_model
             served_cloud_provider = _provider_host(CLOUD_BASE_URL)
             served_reason = "fallback"
 
@@ -678,6 +684,7 @@ async def chat_completions(
     body = json.loads(body_bytes)
     stream = bool(body.get("stream", False))
 
+    requested_vm = resolve_virtual(body.get("model", ""))
     base_url, model_to_send, reason = pick_target(body, x_quality)
     body["model"] = model_to_send
 
@@ -685,7 +692,8 @@ async def chat_completions(
     # the local/cloud/auto policy (may reroute to a multimodal cloud model).
     # No-op unless configured; see apply_vision_policy.
     base_url, model_to_send, body, reason = await apply_vision_policy(
-        body, base_url, model_to_send, reason, x_vision
+        body, base_url, model_to_send, reason, x_vision,
+        vision_enabled=(requested_vm.vision if requested_vm else True),
     )
 
     # stream_options.include_usage: inject on cloud-bound streaming bodies so
@@ -711,9 +719,10 @@ async def chat_completions(
     # Only LOCAL gets a cloud fallback (cloud has no further fallback target).
     fallback_url: str | None = None
     fallback_body: bytes | None = None
+    fallback_cloud_model = requested_vm.cloud_target if requested_vm else CLOUD_DEFAULT_MODEL
     if base_url == LOCAL_BASE_URL:
         fb = dict(body)
-        fb["model"] = CLOUD_DEFAULT_MODEL
+        fb["model"] = fallback_cloud_model
         if stream:
             fb["stream_options"] = {**fb.get("stream_options", {}), "include_usage": True}
         fallback_url = CLOUD_BASE_URL
@@ -728,6 +737,7 @@ async def chat_completions(
         base_url, "/chat/completions", primary_body, dict(request.headers), stream,
         fallback_url=fallback_url, fallback_body=fallback_body,
         cloud_model=served_cloud_model, cloud_provider=served_cloud_provider, reason=reason,
+        fallback_cloud_model=fallback_cloud_model,
     )
 
 
