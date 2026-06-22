@@ -227,6 +227,92 @@ async def record_cost(provider: str, model: str, usd: float, stream: bool, reaso
             log(f"[router] spend ledger write failed ({e}); cost still counted in memory")
 
 
+# --- Live rate card -------------------------------------------------------------
+# Fetch each virtual model's cloud_target price from OpenRouter and expose it
+# read-only. Purely informational: never blocks or fails a request. Lazy with a
+# TTL; the snapshot helper returns the current cache and schedules a background
+# refresh when stale, so endpoints never await the network.
+RATE_CARD_TTL = float(os.environ.get("RATE_CARD_TTL", "86400"))
+RATE_CARD_URL = os.environ.get("RATE_CARD_URL", "https://openrouter.ai/api/v1/models")
+
+_rate_cards: dict[str, dict[str, Any]] = {}
+_rate_cards_fetched_at: float | None = None
+_rate_card_lock = asyncio.Lock()
+
+
+def _parse_rate_card(models_payload: dict[str, Any], target_id: str) -> dict[str, Any] | None:
+    """Extract one model's rate card from an OpenRouter /models payload.
+
+    Pricing fields are USD-per-token strings; we convert to USD-per-Mtok.
+    Returns None if the id isn't present. Missing price fields become None.
+    """
+    for m in models_payload.get("data", []):
+        if m.get("id") != target_id:
+            continue
+        pricing = m.get("pricing", {}) or {}
+        arch = m.get("architecture", {}) or {}
+
+        def per_mtok(key: str) -> float | None:
+            v = pricing.get(key)
+            return round(float(v) * 1_000_000, 6) if v is not None else None
+
+        return {
+            "model": target_id,
+            "input_per_mtok": per_mtok("prompt"),
+            "output_per_mtok": per_mtok("completion"),
+            "cache_read_per_mtok": per_mtok("input_cache_read"),
+            "context_length": m.get("context_length"),
+            "input_modalities": arch.get("input_modalities"),
+        }
+    return None
+
+
+async def get_rate_cards() -> dict[str, dict[str, Any]]:
+    """Fetch + cache rate cards for every distinct cloud_target. Best-effort:
+    on any failure, leaves the existing cache untouched and returns it."""
+    global _rate_cards_fetched_at
+    import time
+    async with _rate_card_lock:
+        targets = {vm.cloud_target for vm in VIRTUAL_MODELS.values()}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(RATE_CARD_URL)
+            payload = r.json() if r.status_code == 200 else {}
+        except Exception as e:  # noqa: BLE001 - pricing is never request-critical
+            log(f"[router] rate-card fetch failed ({e}); using stale/empty cards")
+            return dict(_rate_cards)
+
+        cards: dict[str, dict[str, Any]] = {}
+        for t in targets:
+            card = _parse_rate_card(payload, t)
+            if not card:
+                continue
+            card["fetched_at"] = datetime.now(timezone.utc).isoformat()
+            cards[t] = card
+            # Self-check: a virtual model declaring vision whose cloud_target is
+            # text-only needs the shim. Assert the former config lie in code.
+            for vm in VIRTUAL_MODELS.values():
+                if vm.cloud_target == t and vm.vision and card.get("input_modalities") == ["text"]:
+                    log(f"[router] vision shim required for cloud_target {t} (text-only)")
+
+        if cards:
+            _rate_cards.clear()
+            _rate_cards.update(cards)
+            _rate_cards_fetched_at = time.monotonic()
+        return dict(_rate_cards)
+
+
+def _rate_cards_snapshot_and_maybe_refresh() -> dict[str, dict[str, Any]]:
+    """Return the current cache immediately; schedule a refresh if stale.
+    Non-blocking — endpoints never await the pricing fetch."""
+    import time
+    now = time.monotonic()
+    stale = _rate_cards_fetched_at is None or (now - _rate_cards_fetched_at) >= RATE_CARD_TTL
+    if stale:
+        asyncio.ensure_future(get_rate_cards())
+    return dict(_rate_cards)
+
+
 # --- Vision shim --------------------------------------------------------------
 # When a request carries image content but the chosen target model is text-only
 # (e.g. GLM-5.2), transcribe each image to text via a local vision model
@@ -770,12 +856,14 @@ async def spend(authorization: str | None = Header(default=None)):
     denied = auth_failed(authorization)
     if denied is not None:
         return denied
+    cards = _rate_cards_snapshot_and_maybe_refresh()
     async with _spend_lock:
         return {
             "total_usd": round(_spend_total_usd, 8),
             "requests": _spend_requests,
             "since": _spend_since,
             "ledger": str(SPEND_LEDGER) if SPEND_LEDGER else None,
+            "rate_cards": cards,
             "by_provider": {
                 provider: {
                     "total_usd": round(pv["total_usd"], 8),
@@ -792,6 +880,7 @@ async def spend(authorization: str | None = Header(default=None)):
 
 @app.get("/health")
 async def health():
+    cards = _rate_cards_snapshot_and_maybe_refresh()
     async with _spend_lock:
         spend_summary = {
             "total_usd": round(_spend_total_usd, 8),
@@ -814,5 +903,6 @@ async def health():
             "ocr_min_chars": VISION_OCR_MIN_CHARS,
             "vision_capable_models": sorted(VISION_CAPABLE_MODELS),
         },
+        "rate_cards": cards,
         "spend": spend_summary,
     }

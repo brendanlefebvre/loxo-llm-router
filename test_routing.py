@@ -195,3 +195,34 @@ def test_vision_policy_disabled_short_circuits():
         body, R.LOCAL_BASE_URL, "qwen-local", "virtual-local", None, vision_enabled=False
     ))
     assert out == (R.LOCAL_BASE_URL, "qwen-local", body, "virtual-local")
+
+
+_SAMPLE_MODELS_PAYLOAD = {"data": [
+    {"id": "z-ai/glm-5.2", "context_length": 1048576,
+     "architecture": {"input_modalities": ["text"]},
+     "pricing": {"prompt": "0.000001", "completion": "0.000004",
+                 "input_cache_read": "0.00000018"}},
+    {"id": "other/model", "pricing": {"prompt": "0.000002"}},
+]}
+
+
+def test_parse_rate_card_extracts_per_mtok():
+    card = R._parse_rate_card(_SAMPLE_MODELS_PAYLOAD, "z-ai/glm-5.2")
+    assert card is not None
+    assert card["input_per_mtok"] == 1.0
+    assert card["output_per_mtok"] == 4.0
+    assert card["cache_read_per_mtok"] == 0.18
+    assert card["context_length"] == 1048576
+    assert card["input_modalities"] == ["text"]
+
+
+def test_parse_rate_card_missing_fields_are_none():
+    card = R._parse_rate_card(_SAMPLE_MODELS_PAYLOAD, "other/model")
+    assert card is not None
+    assert card["input_per_mtok"] == 2.0
+    assert card["output_per_mtok"] is None
+    assert card["cache_read_per_mtok"] is None
+
+
+def test_parse_rate_card_unknown_id_returns_none():
+    assert R._parse_rate_card(_SAMPLE_MODELS_PAYLOAD, "nope/nope") is None
