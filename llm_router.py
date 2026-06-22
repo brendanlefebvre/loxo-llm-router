@@ -72,6 +72,7 @@ import hmac
 import json
 import os
 import pathlib
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -85,6 +86,39 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 LOCAL_MODELS = {
     m.strip() for m in os.environ.get("LOCAL_MODELS", "").split(",") if m.strip()
 }
+
+
+@dataclass(frozen=True)
+class VirtualModel:
+    """A client-facing model id the router resolves to real upstream models.
+
+    The abstraction lives here, in code: one entry bundles the cloud/local
+    targets, the vision intent, and the advertised context window. Deployment
+    ids are env-overridable; the structure and intent are legible in one place.
+    """
+    id: str
+    cloud_target: str
+    local_target: str | None = None
+    vision: bool = True
+    advertised_context: int = 1_048_576
+
+
+VIRTUAL_MODELS: dict[str, VirtualModel] = {
+    vm.id: vm for vm in (
+        VirtualModel(
+            id=os.environ.get("AUTO_MODEL_ID", "airwolf/auto"),
+            cloud_target=os.environ.get("AUTO_CLOUD_MODEL", "z-ai/glm-5.2"),
+            local_target=os.environ.get("AUTO_LOCAL_MODEL") or None,
+        ),
+    )
+}
+
+
+def resolve_virtual(model_id: str) -> VirtualModel | None:
+    """Return the VirtualModel for a client-facing id, or None for raw ids."""
+    return VIRTUAL_MODELS.get(model_id)
+
+
 LOCAL_CONTEXT_LIMIT = int(os.environ.get("LOCAL_CONTEXT_LIMIT", "60000"))
 CLOUD_DEFAULT_MODEL = os.environ.get("CLOUD_DEFAULT_MODEL", "anthropic/claude-sonnet-4.6")
 LOCAL_CONNECT_TIMEOUT = float(os.environ.get("LOCAL_CONNECT_TIMEOUT", "5"))

@@ -126,3 +126,16 @@ def test_is_local_model_empty_registry(monkeypatch):
 
 def test_is_local_model_empty_name():
     assert R.is_local_model("") is False
+
+
+def test_resolve_virtual_known():
+    vm = R.resolve_virtual("airwolf/auto")
+    assert vm is not None
+    assert vm.id == "airwolf/auto"
+    assert vm.cloud_target == "z-ai/glm-5.2"
+    assert vm.vision is True
+
+
+def test_resolve_virtual_unknown_returns_none():
+    assert R.resolve_virtual("z-ai/glm-5.2") is None
+    assert R.resolve_virtual("") is None
