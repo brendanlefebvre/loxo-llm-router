@@ -259,12 +259,17 @@ open question on whether to add automated tests (see below):
 8. **`/v1/models`:** `curl localhost:9090/v1/models` → `airwolf/auto` present and
    prepended.
 
-**Open question (testability):** the routing-decision logic (`pick_target` +
-virtual resolution + local-target fallback) is now branchy enough that a small
-pure-function unit test would be cheap and high-value (no network: feed a body +
-headers, assert `(base_url, model_to_send, reason)`). Decide during planning
-whether to introduce a minimal `pytest` for the pure routing functions, or remain
-manual-only per current repo convention.
+**Testability (decided):** introduce a minimal `pytest` over the pure routing
+functions (no network: feed a body + headers, assert `(base_url, model_to_send,
+reason)`). A characterization-test baseline for the *current* `pick_target`,
+`estimate_prompt_tokens`, and `is_local_model` is committed up front
+(`test_routing.py`, 14 tests, green against today's code) so the additive
+virtual-model branch cannot silently regress existing routes. Implementation
+extends this file test-first for: branch-0 virtual resolution, local-target
+fallback (`vm.local_target` → first `LOCAL_MODELS` entry → client id), the `/`
+non-trap, and `vm.cloud_target` transport fallback. `pytest` is a manual dev
+dependency in the router venv (`/Users/brendanl/.venvs/mlx/bin/python3`); run
+with `python3 -m pytest test_routing.py -q` from the repo root.
 
 ## Out of scope (YAGNI)
 
