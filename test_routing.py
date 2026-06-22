@@ -25,6 +25,10 @@ def routing_env(monkeypatch):
     monkeypatch.setattr(R, "LOCAL_BASE_URL", "http://local.test/v1")
     monkeypatch.setattr(R, "CLOUD_BASE_URL", "https://cloud.test/v1")
     monkeypatch.setattr(R, "CLOUD_DEFAULT_MODEL", "anthropic/claude-sonnet-4.6")
+    monkeypatch.setattr(R, "LOCAL_MODELS_ORDER", ["mlx-community/Qwen3.6-35B-A3B-4bit"])
+    monkeypatch.setattr(R, "VIRTUAL_MODELS", {
+        "airwolf/auto": R.VirtualModel(id="airwolf/auto", cloud_target="z-ai/glm-5.2"),
+    })
     yield
 
 
@@ -139,3 +143,42 @@ def test_resolve_virtual_known():
 def test_resolve_virtual_unknown_returns_none():
     assert R.resolve_virtual("z-ai/glm-5.2") is None
     assert R.resolve_virtual("") is None
+
+
+def test_virtual_small_prompt_routes_local_with_resolved_id():
+    base, model, reason = R.pick_target(_body(model="airwolf/auto", text="hi"), None)
+    assert base == R.LOCAL_BASE_URL
+    assert model == "mlx-community/Qwen3.6-35B-A3B-4bit"  # virtual id NOT forwarded
+    assert reason == "virtual-local"
+
+
+def test_virtual_quality_best_routes_cloud_target():
+    base, model, reason = R.pick_target(_body(model="airwolf/auto"), "best")
+    assert base == R.CLOUD_BASE_URL
+    assert model == "z-ai/glm-5.2"
+    assert reason == "virtual-quality-best"
+
+
+def test_virtual_large_prompt_routes_cloud_target(monkeypatch):
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 10)
+    base, model, reason = R.pick_target(_body(model="airwolf/auto", text="x" * 1000), None)
+    assert base == R.CLOUD_BASE_URL
+    assert model == "z-ai/glm-5.2"
+    assert reason == "virtual-prompt-too-long"
+
+
+def test_virtual_slash_is_not_treated_as_provider_prefixed():
+    # airwolf/auto contains "/" but must NOT fall to the provider-prefixed rule.
+    _, _, reason = R.pick_target(_body(model="airwolf/auto", text="hi"), None)
+    assert reason.startswith("virtual")
+
+
+def test_local_target_for_explicit_override():
+    vm = R.VirtualModel(id="x", cloud_target="c", local_target="custom-local")
+    assert R.local_target_for(vm, "fallback") == "custom-local"
+
+
+def test_local_target_for_empty_models_uses_fallback(monkeypatch):
+    monkeypatch.setattr(R, "LOCAL_MODELS_ORDER", [])
+    vm = R.VirtualModel(id="x", cloud_target="c")
+    assert R.local_target_for(vm, "airwolf/auto") == "airwolf/auto"

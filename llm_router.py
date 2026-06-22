@@ -83,9 +83,10 @@ from fastapi.responses import StreamingResponse
 LOCAL_BASE_URL = os.environ.get("LOCAL_BASE_URL", "http://localhost:7979/v1").rstrip("/")
 CLOUD_BASE_URL = os.environ.get("CLOUD_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-LOCAL_MODELS = {
+LOCAL_MODELS_ORDER = [
     m.strip() for m in os.environ.get("LOCAL_MODELS", "").split(",") if m.strip()
-}
+]
+LOCAL_MODELS = set(LOCAL_MODELS_ORDER)
 
 
 @dataclass(frozen=True)
@@ -487,9 +488,30 @@ async def apply_vision_policy(
     return _reroute_to_cloud("auto-escalated")
 
 
+def local_target_for(vm: VirtualModel, fallback_model: str) -> str:
+    """Resolve the real local model id to send for a virtual request.
+
+    Order: explicit vm.local_target -> first configured LOCAL_MODELS entry ->
+    the caller's original model id (degrade, don't crash if no local models).
+    """
+    if vm.local_target:
+        return vm.local_target
+    if LOCAL_MODELS_ORDER:
+        return LOCAL_MODELS_ORDER[0]
+    return fallback_model
+
+
 def pick_target(body: dict[str, Any], quality_header: str | None) -> tuple[str, str, str]:
     """Return (base_url, model_to_send, reason) for logging."""
     model = body.get("model", "")
+
+    vm = resolve_virtual(model)
+    if vm is not None:
+        if (quality_header or "").lower() == "best":
+            return CLOUD_BASE_URL, vm.cloud_target, "virtual-quality-best"
+        if estimate_prompt_tokens(body) > LOCAL_CONTEXT_LIMIT:
+            return CLOUD_BASE_URL, vm.cloud_target, "virtual-prompt-too-long"
+        return LOCAL_BASE_URL, local_target_for(vm, model), "virtual-local"
 
     if is_local_model(model):
         return LOCAL_BASE_URL, model, "explicit-local-model"
