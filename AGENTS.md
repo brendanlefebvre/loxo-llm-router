@@ -40,15 +40,43 @@ streaming before the first byte is sent.
 
 ## Vision shim (opt-in)
 
-Disabled unless `VISION_SHIM_MODEL` is set. When set, image content aimed at a
-text-only target is transcribed via a local VLM (`VISION_SHIM_URL`), with a
-3-mode policy (`VISION_MODE`: `auto`/`local`/`cloud`) per-request overridable
-via the `x-vision` header. `VISION_CAPABLE_MODELS` skips the shim for models
-that already handle images.
+Disabled unless `VISION_SHIM_MODEL` (local OCR) or `VISION_CLOUD_MODEL`
+(multimodal cloud reroute) is set. When set, image content aimed at a
+text-only target is handled per a 3-mode policy (`VISION_MODE`:
+`auto`/`local`/`cloud`), per-request overridable via the `x-vision` header:
+
+- `local` — OCR each image via a local VLM (`VISION_SHIM_URL`), feed the
+  resulting text to the text-only model.
+- `cloud` — reroute the whole request (images intact) to `VISION_CLOUD_MODEL`,
+  a multimodal cloud model.
+- `auto` — OCR locally; if the transcription is thin
+  (`< VISION_OCR_MIN_CHARS` chars, likely a non-text image), escalate to
+  cloud vision via `VISION_CLOUD_MODEL`.
+
+`VISION_CAPABLE_MODELS` skips the shim for models that already handle images.
+
+## Cloud spend tracking
+
+The router tracks the actual USD cost of every cloud request by reading
+`usage.cost` from OpenRouter responses (always present; no request flags needed).
+
+- `GET /v1/spend` — returns `total_usd`, `requests`, `since`, `ledger`
+  (path string, or null if disabled), and a `by_provider` → `by_model`
+  breakdown (provider = API hostname, e.g. `openrouter.ai`). Auth-gated
+  like other endpoints.
+- `GET /health` — includes a compact `spend` summary.
+- Per-request log line: `[router] cloud cost=$X.XXXXXX provider=... model=... total=$Y.YYYYYY`
+- `SPEND_LEDGER` (env var) — path to append-only JSONL ledger; default
+  `~/.config/llm-router/spend.jsonl`. Seeded into memory on startup so totals
+  survive LaunchAgent restarts. Set to `""` to disable (in-memory only).
+
+Note: OpenCode's own `$0.00` display is unchanged — it has no mechanism to read
+cost from a custom provider. Use `curl localhost:9090/v1/spend` for the real figure.
 
 ## Verification
 
 No automated tests. To verify changes manually:
 - `curl http://localhost:9090/v1/models` (or a chat completions POST)
+- `curl http://localhost:9090/v1/spend` — check cloud spend totals
 - Tail `~/Library/Logs/llm-router/err.log` for tracebacks.
 - `ROUTER_QUIET` defaults to off — per-request routing decisions log to `out.log`.

@@ -52,6 +52,11 @@ Configuration (env vars):
   VISION_CLOUD_MODEL     multimodal cloud model to reroute image requests to in
                          cloud/auto-escalation modes (e.g. anthropic/claude-...).
   VISION_OCR_MIN_CHARS   auto-mode threshold; OCR shorter than this escalates.
+  SPEND_LEDGER           path to an append-only JSONL file that persists cloud
+                         spend across restarts (default
+                         ~/.config/llm-router/spend.jsonl). Set to "" to
+                         disable durability (in-memory only). The file is
+                         read once on startup to seed the accumulator.
 
 Run:
   pip install fastapi uvicorn httpx
@@ -62,9 +67,12 @@ Clients point any OpenAI-compatible SDK at http://<router-host>:9090/v1 .
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import os
+import pathlib
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -86,6 +94,103 @@ QUIET = os.environ.get("ROUTER_QUIET", "") == "1"
 # The router proxies to PAID cloud with your key, so on a multi-client LAN this
 # stops anyone who can reach the port from spending your OpenRouter credits.
 ROUTER_TOKEN = os.environ.get("ROUTER_TOKEN", "")
+
+_DEFAULT_LEDGER = pathlib.Path.home() / ".config" / "llm-router" / "spend.jsonl"
+_ledger_env = os.environ.get("SPEND_LEDGER", str(_DEFAULT_LEDGER))
+SPEND_LEDGER = pathlib.Path(_ledger_env) if _ledger_env else None
+
+# --- Spend accumulator ----------------------------------------------------------
+# In-memory totals, seeded from SPEND_LEDGER on startup if configured.
+# Guarded by _spend_lock; never let a ledger write failure break a response.
+# Structure: by_provider[hostname][model] -> {usd, requests}
+_spend_lock = asyncio.Lock()
+_spend_total_usd: float = 0.0
+_spend_requests: int = 0
+_spend_since: str = datetime.now(timezone.utc).isoformat()
+_spend_by_provider: dict[str, dict[str, Any]] = {}  # host -> {total_usd, requests, by_model}
+
+
+def _provider_host(base_url: str) -> str:
+    """Extract the hostname from a base URL to use as the provider key."""
+    from urllib.parse import urlparse
+    return urlparse(base_url).hostname or base_url
+
+
+def _accumulate(provider: str, model: str, usd: float) -> None:
+    """Update in-memory totals (must be called with _spend_lock held)."""
+    global _spend_total_usd, _spend_requests
+    _spend_total_usd += usd
+    _spend_requests += 1
+    if provider not in _spend_by_provider:
+        _spend_by_provider[provider] = {"total_usd": 0.0, "requests": 0, "by_model": {}}
+    p = _spend_by_provider[provider]
+    p["total_usd"] += usd
+    p["requests"] += 1
+    if model not in p["by_model"]:
+        p["by_model"][model] = {"usd": 0.0, "requests": 0}
+    p["by_model"][model]["usd"] += usd
+    p["by_model"][model]["requests"] += 1
+
+
+def _seed_spend_from_ledger() -> None:
+    """Read SPEND_LEDGER at startup and populate the in-memory accumulator."""
+    global _spend_since
+    if not SPEND_LEDGER or not SPEND_LEDGER.exists():
+        return
+    earliest: str | None = None
+    try:
+        for raw in SPEND_LEDGER.read_text().splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            usd = float(entry.get("usd", 0) or 0)
+            if usd <= 0:
+                continue
+            model = entry.get("model", "unknown")
+            provider = entry.get("provider", "unknown")
+            ts = entry.get("ts", "")
+            _accumulate(provider, model, usd)
+            if ts and (earliest is None or ts < earliest):
+                earliest = ts
+        if earliest:
+            _spend_since = earliest
+    except Exception as e:
+        print(f"[router] spend ledger seed failed ({e}); starting fresh")
+
+
+_seed_spend_from_ledger()
+
+
+async def record_cost(provider: str, model: str, usd: float, stream: bool, reason: str) -> None:
+    """Thread-safe: update in-memory totals and append to the JSONL ledger."""
+    if usd <= 0:
+        return
+    async with _spend_lock:
+        _accumulate(provider, model, usd)
+        total = _spend_total_usd
+
+    log(f"[router] cloud cost=${usd:.6f} provider={provider} model={model} total=${total:.6f}")
+
+    if SPEND_LEDGER:
+        entry = json.dumps({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "provider": provider,
+            "model": model,
+            "usd": usd,
+            "stream": stream,
+            "reason": reason,
+        })
+        try:
+            SPEND_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+            with SPEND_LEDGER.open("a") as f:
+                f.write(entry + "\n")
+        except Exception as e:
+            log(f"[router] spend ledger write failed ({e}); cost still counted in memory")
+
 
 # --- Vision shim --------------------------------------------------------------
 # When a request carries image content but the chosen target model is text-only
@@ -377,6 +482,23 @@ def _headers_for(url: str, client_headers: dict[str, str]) -> dict[str, str]:
     return h
 
 
+def _extract_cost_from_sse_line(line: bytes) -> float | None:
+    """Parse a single SSE `data: {...}` line; return usage.cost if present."""
+    try:
+        text = line.decode("utf-8", errors="replace").strip()
+        if not text.startswith("data:"):
+            return None
+        payload = text[5:].strip()
+        if payload == "[DONE]":
+            return None
+        obj = json.loads(payload)
+        cost = obj.get("usage", {}) or {}
+        val = cost.get("cost")
+        return float(val) if val is not None else None
+    except Exception:
+        return None
+
+
 async def forward(
     primary_url: str,
     path: str,
@@ -385,14 +507,24 @@ async def forward(
     stream: bool,
     fallback_url: str | None = None,
     fallback_body: bytes | None = None,
+    cloud_model: str | None = None,
+    cloud_provider: str | None = None,
+    reason: str = "",
 ):
     """Forward to primary_url; on a transport failure, transparently retry against
     fallback_url (if given). For streaming, the fallback only applies before the
-    first byte has been yielded — a partially-sent stream cannot be restarted."""
+    first byte has been yielded — a partially-sent stream cannot be restarted.
+
+    cloud_model / cloud_provider: when set, the served response came from cloud
+    and we should extract usage.cost and call record_cost.
+    """
 
     if stream:
         async def streamer():
             client = httpx.AsyncClient(timeout=TIMEOUT)
+            served_cloud_model = cloud_model
+            served_cloud_provider = cloud_provider
+            served_reason = reason
             try:
                 url, body = primary_url, primary_body
                 can_fallback = fallback_url is not None
@@ -403,15 +535,34 @@ async def forward(
                             "POST", f"{url}{path}", content=body,
                             headers=_headers_for(url, client_headers),
                         ) as resp:
+                            buf = b""
+                            cost_found: float | None = None
                             async for chunk in resp.aiter_raw():
                                 yielded = True
                                 yield chunk
+                                # Tee: scan for the terminal SSE usage chunk.
+                                if served_cloud_model:
+                                    buf += chunk
+                                    # Process complete lines; keep partial tail.
+                                    while b"\n" in buf:
+                                        line, buf = buf.split(b"\n", 1)
+                                        c = _extract_cost_from_sse_line(line)
+                                        if c is not None:
+                                            cost_found = c
+                            if served_cloud_model and served_cloud_provider and cost_found is not None:
+                                asyncio.ensure_future(
+                                    record_cost(served_cloud_provider, served_cloud_model,
+                                                cost_found, stream=True, reason=served_reason)
+                                )
                         return
                     except FALLBACK_ERRORS:
                         if can_fallback and not yielded:
                             log(f"[router] stream: {url} unreachable pre-first-byte, "
                                 f"falling back to cloud/{CLOUD_DEFAULT_MODEL}")
                             url, body = fallback_url, fallback_body  # type: ignore[assignment]
+                            served_cloud_model = CLOUD_DEFAULT_MODEL
+                            served_cloud_provider = _provider_host(CLOUD_BASE_URL)
+                            served_reason = "fallback"
                             can_fallback = False
                             continue
                         raise
@@ -420,6 +571,9 @@ async def forward(
         return StreamingResponse(streamer(), media_type="text/event-stream")
 
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        served_cloud_model = cloud_model
+        served_cloud_provider = cloud_provider
+        served_reason = reason
         try:
             resp = await client.post(
                 f"{primary_url}{path}", content=primary_body,
@@ -433,6 +587,19 @@ async def forward(
                 f"{fallback_url}{path}", content=fallback_body,
                 headers=_headers_for(fallback_url, client_headers),
             )
+            served_cloud_model = CLOUD_DEFAULT_MODEL
+            served_cloud_provider = _provider_host(CLOUD_BASE_URL)
+            served_reason = "fallback"
+
+        if served_cloud_model and served_cloud_provider and resp.status_code == 200:
+            try:
+                cost = (json.loads(resp.content).get("usage") or {}).get("cost")
+                if cost is not None:
+                    await record_cost(served_cloud_provider, served_cloud_model,
+                                      float(cost), stream=False, reason=served_reason)
+            except Exception:
+                pass
+
         return Response(
             content=resp.content,
             status_code=resp.status_code,
@@ -465,6 +632,22 @@ async def chat_completions(
         body, base_url, model_to_send, reason, x_vision
     )
 
+    # stream_options.include_usage: inject on cloud-bound streaming bodies so
+    # OpenCode (via @ai-sdk/openai-compatible) reads token counts from the final
+    # SSE chunk and can display cost. Strip it from local-bound bodies — local
+    # servers may not handle it and it serves no purpose there.
+    if stream:
+        if base_url == CLOUD_BASE_URL:
+            body["stream_options"] = {**body.get("stream_options", {}), "include_usage": True}
+        else:
+            so = body.get("stream_options")
+            if isinstance(so, dict) and "include_usage" in so:
+                so = {k: v for k, v in so.items() if k != "include_usage"}
+                if so:
+                    body["stream_options"] = so
+                else:
+                    body.pop("stream_options")
+
     primary_body = json.dumps(body).encode()
 
     log(f"[router] -> {base_url} model={model_to_send} reason={reason}")
@@ -475,12 +658,20 @@ async def chat_completions(
     if base_url == LOCAL_BASE_URL:
         fb = dict(body)
         fb["model"] = CLOUD_DEFAULT_MODEL
+        if stream:
+            fb["stream_options"] = {**fb.get("stream_options", {}), "include_usage": True}
         fallback_url = CLOUD_BASE_URL
         fallback_body = json.dumps(fb).encode()
+
+    # Pass cloud_model/provider so forward() can attribute usage.cost correctly.
+    is_cloud = base_url == CLOUD_BASE_URL
+    served_cloud_model = model_to_send if is_cloud else None
+    served_cloud_provider = _provider_host(CLOUD_BASE_URL) if is_cloud else None
 
     return await forward(
         base_url, "/chat/completions", primary_body, dict(request.headers), stream,
         fallback_url=fallback_url, fallback_body=fallback_body,
+        cloud_model=served_cloud_model, cloud_provider=served_cloud_provider, reason=reason,
     )
 
 
@@ -502,8 +693,45 @@ async def models(authorization: str | None = Header(default=None)):
     return {"object": "list", "data": merged}
 
 
+@app.get("/v1/spend")
+async def spend(authorization: str | None = Header(default=None)):
+    """Return aggregated cloud spend tracked by this router instance.
+
+    Totals are seeded from SPEND_LEDGER on startup (all-time) and updated
+    live per request. `since` reflects the earliest ledger entry, or the
+    process start time if the ledger is empty or disabled.
+    """
+    denied = auth_failed(authorization)
+    if denied is not None:
+        return denied
+    async with _spend_lock:
+        return {
+            "total_usd": round(_spend_total_usd, 8),
+            "requests": _spend_requests,
+            "since": _spend_since,
+            "ledger": str(SPEND_LEDGER) if SPEND_LEDGER else None,
+            "by_provider": {
+                provider: {
+                    "total_usd": round(pv["total_usd"], 8),
+                    "requests": pv["requests"],
+                    "by_model": {
+                        m: {"usd": round(mv["usd"], 8), "requests": mv["requests"]}
+                        for m, mv in sorted(pv["by_model"].items())
+                    },
+                }
+                for provider, pv in sorted(_spend_by_provider.items())
+            },
+        }
+
+
 @app.get("/health")
 async def health():
+    async with _spend_lock:
+        spend_summary = {
+            "total_usd": round(_spend_total_usd, 8),
+            "requests": _spend_requests,
+            "since": _spend_since,
+        }
     return {
         "status": "ok",
         "local": LOCAL_BASE_URL,
@@ -520,4 +748,5 @@ async def health():
             "ocr_min_chars": VISION_OCR_MIN_CHARS,
             "vision_capable_models": sorted(VISION_CAPABLE_MODELS),
         },
+        "spend": spend_summary,
     }
