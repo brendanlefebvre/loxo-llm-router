@@ -2,7 +2,8 @@
 
 Single-file FastAPI proxy (`llm_router.py`) that routes OpenAI-compatible
 requests to a local MLX endpoint (:7979) or cloud (OpenRouter) based on
-intent heuristics. No build, no tests, no requirements file.
+intent heuristics. No build step; a minimal `pytest` covers routing
+(`test_routing.py`); no requirements file.
 
 ## Running / deploying
 
@@ -25,8 +26,22 @@ intent heuristics. No build, no tests, no requirements file.
 - `OPENROUTER_API_KEY` (and optional `ROUTER_TOKEN`) live in
   `~/.config/llm-router/env` (chmod 600, gitignored). Never commit.
 
+## Virtual models
+
+The router owns a `VirtualModel` registry (`VIRTUAL_MODELS` in `llm_router.py`).
+Clients send a single virtual id (default `airwolf/auto`); the router resolves it
+to real upstream models via the routing rules below — `cloud_target`
+(`z-ai/glm-5.2`) when routed to cloud, the first `LOCAL_MODELS` entry when local.
+The virtual id is never forwarded upstream. This is why the OpenCode config
+declares one honest `airwolf/auto` entry with `attachment: true` (true of the
+pipeline — the router shims/reroutes images) instead of lying about a specific
+model. Override ids via `AUTO_MODEL_ID` / `AUTO_CLOUD_MODEL` / `AUTO_LOCAL_MODEL`.
+
 ## Routing rules (first match wins)
 
+0. `model` matches a `VIRTUAL_MODELS` id → resolve via rules below, substituting
+   the real upstream id (`x-quality: best` or oversized prompt → `cloud_target`,
+   else local target)
 1. `model` matches a `LOCAL_MODELS` tag → LOCAL
 2. `x-quality: best` header → CLOUD
 3. estimated prompt > `LOCAL_CONTEXT_LIMIT` tokens → CLOUD
@@ -73,9 +88,16 @@ The router tracks the actual USD cost of every cloud request by reading
 Note: OpenCode's own `$0.00` display is unchanged — it has no mechanism to read
 cost from a custom provider. Use `curl localhost:9090/v1/spend` for the real figure.
 
+The router also exposes a live **rate card** (price *before* spending) fetched
+from OpenRouter pricing (`RATE_CARD_URL`, cached `RATE_CARD_TTL` seconds, lazy +
+non-blocking). It appears under `rate_cards` in both `/health` and `/v1/spend`,
+giving per-Mtok input/output/cache-read rates for each `cloud_target` alongside
+the `usage.cost` actuals. On fetch, a text-only `cloud_target` whose virtual
+model declares vision logs a one-line shim-required self-check.
+
 ## Verification
 
-No automated tests. To verify changes manually:
+Unit tests in `test_routing.py` cover routing logic. To verify manually:
 - `curl http://localhost:9090/v1/models` (or a chat completions POST)
 - `curl http://localhost:9090/v1/spend` — check cloud spend totals
 - Tail `~/Library/Logs/llm-router/err.log` for tracebacks.

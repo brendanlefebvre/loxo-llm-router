@@ -33,6 +33,15 @@ Configuration (env vars):
   LOCAL_MODELS           comma-separated, e.g. "qwen3.6-35b-a3b,qwen3-30b-a3b"
   LOCAL_CONTEXT_LIMIT    default 60000 (tokens; ~240k chars)
   CLOUD_DEFAULT_MODEL    default anthropic/claude-sonnet-4.6
+  AUTO_MODEL_ID          virtual model id clients send (default "airwolf/auto").
+                         Resolved by the router to real upstream models below.
+  AUTO_CLOUD_MODEL       cloud target the virtual model routes to (default
+                         "z-ai/glm-5.2").
+  AUTO_LOCAL_MODEL       local target for the virtual model; unset = first
+                         LOCAL_MODELS entry.
+  RATE_CARD_TTL          seconds before the live rate card is refreshed
+                         (default 86400). Fetch is non-blocking and best-effort.
+  RATE_CARD_URL          pricing source (default OpenRouter /api/v1/models).
   LOCAL_CONNECT_TIMEOUT  default 5 (seconds; how fast "local is down" fails over)
   ROUTER_QUIET           set to "1" to silence per-request routing logs
   ROUTER_TOKEN           optional shared secret; if set, clients must send
@@ -72,6 +81,7 @@ import hmac
 import json
 import os
 import pathlib
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -82,9 +92,43 @@ from fastapi.responses import StreamingResponse
 LOCAL_BASE_URL = os.environ.get("LOCAL_BASE_URL", "http://localhost:7979/v1").rstrip("/")
 CLOUD_BASE_URL = os.environ.get("CLOUD_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-LOCAL_MODELS = {
+LOCAL_MODELS_ORDER = [
     m.strip() for m in os.environ.get("LOCAL_MODELS", "").split(",") if m.strip()
+]
+LOCAL_MODELS = set(LOCAL_MODELS_ORDER)
+
+
+@dataclass(frozen=True)
+class VirtualModel:
+    """A client-facing model id the router resolves to real upstream models.
+
+    The abstraction lives here, in code: one entry bundles the cloud/local
+    targets, the vision intent, and the advertised context window. Deployment
+    ids are env-overridable; the structure and intent are legible in one place.
+    """
+    id: str
+    cloud_target: str
+    local_target: str | None = None
+    vision: bool = True
+    advertised_context: int = 1_048_576
+
+
+VIRTUAL_MODELS: dict[str, VirtualModel] = {
+    vm.id: vm for vm in (
+        VirtualModel(
+            id=os.environ.get("AUTO_MODEL_ID", "airwolf/auto"),
+            cloud_target=os.environ.get("AUTO_CLOUD_MODEL", "z-ai/glm-5.2"),
+            local_target=os.environ.get("AUTO_LOCAL_MODEL") or None,
+        ),
+    )
 }
+
+
+def resolve_virtual(model_id: str) -> VirtualModel | None:
+    """Return the VirtualModel for a client-facing id, or None for raw ids."""
+    return VIRTUAL_MODELS.get(model_id)
+
+
 LOCAL_CONTEXT_LIMIT = int(os.environ.get("LOCAL_CONTEXT_LIMIT", "60000"))
 CLOUD_DEFAULT_MODEL = os.environ.get("CLOUD_DEFAULT_MODEL", "anthropic/claude-sonnet-4.6")
 LOCAL_CONNECT_TIMEOUT = float(os.environ.get("LOCAL_CONNECT_TIMEOUT", "5"))
@@ -190,6 +234,92 @@ async def record_cost(provider: str, model: str, usd: float, stream: bool, reaso
                 f.write(entry + "\n")
         except Exception as e:
             log(f"[router] spend ledger write failed ({e}); cost still counted in memory")
+
+
+# --- Live rate card -------------------------------------------------------------
+# Fetch each virtual model's cloud_target price from OpenRouter and expose it
+# read-only. Purely informational: never blocks or fails a request. Lazy with a
+# TTL; the snapshot helper returns the current cache and schedules a background
+# refresh when stale, so endpoints never await the network.
+RATE_CARD_TTL = float(os.environ.get("RATE_CARD_TTL", "86400"))
+RATE_CARD_URL = os.environ.get("RATE_CARD_URL", "https://openrouter.ai/api/v1/models")
+
+_rate_cards: dict[str, dict[str, Any]] = {}
+_rate_cards_fetched_at: float | None = None
+_rate_card_lock = asyncio.Lock()
+
+
+def _parse_rate_card(models_payload: dict[str, Any], target_id: str) -> dict[str, Any] | None:
+    """Extract one model's rate card from an OpenRouter /models payload.
+
+    Pricing fields are USD-per-token strings; we convert to USD-per-Mtok.
+    Returns None if the id isn't present. Missing price fields become None.
+    """
+    for m in models_payload.get("data", []):
+        if m.get("id") != target_id:
+            continue
+        pricing = m.get("pricing", {}) or {}
+        arch = m.get("architecture", {}) or {}
+
+        def per_mtok(key: str) -> float | None:
+            v = pricing.get(key)
+            return round(float(v) * 1_000_000, 6) if v is not None else None
+
+        return {
+            "model": target_id,
+            "input_per_mtok": per_mtok("prompt"),
+            "output_per_mtok": per_mtok("completion"),
+            "cache_read_per_mtok": per_mtok("input_cache_read"),
+            "context_length": m.get("context_length"),
+            "input_modalities": arch.get("input_modalities"),
+        }
+    return None
+
+
+async def get_rate_cards() -> dict[str, dict[str, Any]]:
+    """Fetch + cache rate cards for every distinct cloud_target. Best-effort:
+    on any failure, leaves the existing cache untouched and returns it."""
+    global _rate_cards_fetched_at
+    import time
+    async with _rate_card_lock:
+        targets = {vm.cloud_target for vm in VIRTUAL_MODELS.values()}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(RATE_CARD_URL)
+            payload = r.json() if r.status_code == 200 else {}
+        except Exception as e:  # noqa: BLE001 - pricing is never request-critical
+            log(f"[router] rate-card fetch failed ({e}); using stale/empty cards")
+            return dict(_rate_cards)
+
+        cards: dict[str, dict[str, Any]] = {}
+        for t in targets:
+            card = _parse_rate_card(payload, t)
+            if not card:
+                continue
+            card["fetched_at"] = datetime.now(timezone.utc).isoformat()
+            cards[t] = card
+            # Self-check: a virtual model declaring vision whose cloud_target is
+            # text-only needs the shim. Assert the former config lie in code.
+            for vm in VIRTUAL_MODELS.values():
+                if vm.cloud_target == t and vm.vision and card.get("input_modalities") == ["text"]:
+                    log(f"[router] vision shim required for cloud_target {t} (text-only)")
+
+        if cards:
+            _rate_cards.clear()
+            _rate_cards.update(cards)
+            _rate_cards_fetched_at = time.monotonic()
+        return dict(_rate_cards)
+
+
+def _rate_cards_snapshot_and_maybe_refresh() -> dict[str, dict[str, Any]]:
+    """Return the current cache immediately; schedule a refresh if stale.
+    Non-blocking — endpoints never await the pricing fetch."""
+    import time
+    now = time.monotonic()
+    stale = _rate_cards_fetched_at is None or (now - _rate_cards_fetched_at) >= RATE_CARD_TTL
+    if stale:
+        asyncio.ensure_future(get_rate_cards())
+    return dict(_rate_cards)
 
 
 # --- Vision shim --------------------------------------------------------------
@@ -400,6 +530,7 @@ async def apply_vision_policy(
     model_to_send: str,
     reason: str,
     x_vision: str | None,
+    vision_enabled: bool = True,
 ) -> tuple[str, str, dict[str, Any], str]:
     """Decide how to handle image content when the target model is text-only.
 
@@ -414,6 +545,8 @@ async def apply_vision_policy(
     Returns (base_url, model_to_send, body, reason) - possibly rerouted to cloud.
     No-op when the target already sees, there are no images, or nothing's configured.
     """
+    if not vision_enabled:
+        return base_url, model_to_send, body, reason
     if is_vision_capable(model_to_send):
         return base_url, model_to_send, body, reason
     if not count_images(body):
@@ -453,9 +586,30 @@ async def apply_vision_policy(
     return _reroute_to_cloud("auto-escalated")
 
 
+def local_target_for(vm: VirtualModel, fallback_model: str) -> str:
+    """Resolve the real local model id to send for a virtual request.
+
+    Order: explicit vm.local_target -> first configured LOCAL_MODELS entry ->
+    the caller's original model id (degrade, don't crash if no local models).
+    """
+    if vm.local_target:
+        return vm.local_target
+    if LOCAL_MODELS_ORDER:
+        return LOCAL_MODELS_ORDER[0]
+    return fallback_model
+
+
 def pick_target(body: dict[str, Any], quality_header: str | None) -> tuple[str, str, str]:
     """Return (base_url, model_to_send, reason) for logging."""
     model = body.get("model", "")
+
+    vm = resolve_virtual(model)
+    if vm is not None:
+        if (quality_header or "").lower() == "best":
+            return CLOUD_BASE_URL, vm.cloud_target, "virtual-quality-best"
+        if estimate_prompt_tokens(body) > LOCAL_CONTEXT_LIMIT:
+            return CLOUD_BASE_URL, vm.cloud_target, "virtual-prompt-too-long"
+        return LOCAL_BASE_URL, local_target_for(vm, model), "virtual-local"
 
     if is_local_model(model):
         return LOCAL_BASE_URL, model, "explicit-local-model"
@@ -510,6 +664,7 @@ async def forward(
     cloud_model: str | None = None,
     cloud_provider: str | None = None,
     reason: str = "",
+    fallback_cloud_model: str | None = None,
 ):
     """Forward to primary_url; on a transport failure, transparently retry against
     fallback_url (if given). For streaming, the fallback only applies before the
@@ -557,10 +712,11 @@ async def forward(
                         return
                     except FALLBACK_ERRORS:
                         if can_fallback and not yielded:
+                            fb_model = fallback_cloud_model or CLOUD_DEFAULT_MODEL
                             log(f"[router] stream: {url} unreachable pre-first-byte, "
-                                f"falling back to cloud/{CLOUD_DEFAULT_MODEL}")
+                                f"falling back to cloud/{fb_model}")
                             url, body = fallback_url, fallback_body  # type: ignore[assignment]
-                            served_cloud_model = CLOUD_DEFAULT_MODEL
+                            served_cloud_model = fb_model
                             served_cloud_provider = _provider_host(CLOUD_BASE_URL)
                             served_reason = "fallback"
                             can_fallback = False
@@ -582,12 +738,13 @@ async def forward(
         except FALLBACK_ERRORS:
             if fallback_url is None:
                 raise
-            log(f"[router] {primary_url} unreachable, falling back to cloud/{CLOUD_DEFAULT_MODEL}")
+            fb_model = fallback_cloud_model or CLOUD_DEFAULT_MODEL
+            log(f"[router] {primary_url} unreachable, falling back to cloud/{fb_model}")
             resp = await client.post(
                 f"{fallback_url}{path}", content=fallback_body,
                 headers=_headers_for(fallback_url, client_headers),
             )
-            served_cloud_model = CLOUD_DEFAULT_MODEL
+            served_cloud_model = fb_model
             served_cloud_provider = _provider_host(CLOUD_BASE_URL)
             served_reason = "fallback"
 
@@ -622,6 +779,7 @@ async def chat_completions(
     body = json.loads(body_bytes)
     stream = bool(body.get("stream", False))
 
+    requested_vm = resolve_virtual(body.get("model", ""))
     base_url, model_to_send, reason = pick_target(body, x_quality)
     body["model"] = model_to_send
 
@@ -629,7 +787,8 @@ async def chat_completions(
     # the local/cloud/auto policy (may reroute to a multimodal cloud model).
     # No-op unless configured; see apply_vision_policy.
     base_url, model_to_send, body, reason = await apply_vision_policy(
-        body, base_url, model_to_send, reason, x_vision
+        body, base_url, model_to_send, reason, x_vision,
+        vision_enabled=(requested_vm.vision if requested_vm else True),
     )
 
     # stream_options.include_usage: inject on cloud-bound streaming bodies so
@@ -655,9 +814,10 @@ async def chat_completions(
     # Only LOCAL gets a cloud fallback (cloud has no further fallback target).
     fallback_url: str | None = None
     fallback_body: bytes | None = None
+    fallback_cloud_model = requested_vm.cloud_target if requested_vm else CLOUD_DEFAULT_MODEL
     if base_url == LOCAL_BASE_URL:
         fb = dict(body)
-        fb["model"] = CLOUD_DEFAULT_MODEL
+        fb["model"] = fallback_cloud_model
         if stream:
             fb["stream_options"] = {**fb.get("stream_options", {}), "include_usage": True}
         fallback_url = CLOUD_BASE_URL
@@ -672,7 +832,21 @@ async def chat_completions(
         base_url, "/chat/completions", primary_body, dict(request.headers), stream,
         fallback_url=fallback_url, fallback_body=fallback_body,
         cloud_model=served_cloud_model, cloud_provider=served_cloud_provider, reason=reason,
+        fallback_cloud_model=fallback_cloud_model,
     )
+
+
+def _virtual_model_entries() -> list[dict[str, Any]]:
+    """Synthesized /v1/models entries advertising the router's virtual models."""
+    return [
+        {
+            "id": vm.id,
+            "object": "model",
+            "owned_by": "airwolf-llm-router",
+            "context_length": vm.advertised_context,
+        }
+        for vm in VIRTUAL_MODELS.values()
+    ]
 
 
 @app.get("/v1/models")
@@ -680,7 +854,7 @@ async def models(authorization: str | None = Header(default=None)):
     denied = auth_failed(authorization)
     if denied is not None:
         return denied
-    merged: list[dict[str, Any]] = []
+    merged: list[dict[str, Any]] = _virtual_model_entries()
     async with httpx.AsyncClient(timeout=30.0) as client:
         for base, auth in ((LOCAL_BASE_URL, None), (CLOUD_BASE_URL, OPENROUTER_API_KEY)):
             try:
@@ -704,12 +878,14 @@ async def spend(authorization: str | None = Header(default=None)):
     denied = auth_failed(authorization)
     if denied is not None:
         return denied
+    cards = _rate_cards_snapshot_and_maybe_refresh()
     async with _spend_lock:
         return {
             "total_usd": round(_spend_total_usd, 8),
             "requests": _spend_requests,
             "since": _spend_since,
             "ledger": str(SPEND_LEDGER) if SPEND_LEDGER else None,
+            "rate_cards": cards,
             "by_provider": {
                 provider: {
                     "total_usd": round(pv["total_usd"], 8),
@@ -726,6 +902,7 @@ async def spend(authorization: str | None = Header(default=None)):
 
 @app.get("/health")
 async def health():
+    cards = _rate_cards_snapshot_and_maybe_refresh()
     async with _spend_lock:
         spend_summary = {
             "total_usd": round(_spend_total_usd, 8),
@@ -748,5 +925,6 @@ async def health():
             "ocr_min_chars": VISION_OCR_MIN_CHARS,
             "vision_capable_models": sorted(VISION_CAPABLE_MODELS),
         },
+        "rate_cards": cards,
         "spend": spend_summary,
     }
