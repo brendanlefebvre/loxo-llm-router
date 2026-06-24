@@ -99,7 +99,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Header, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 LOCAL_BASE_URL = os.environ.get("LOCAL_BASE_URL", "http://localhost:7979/v1").rstrip("/")
 CLOUD_BASE_URL = os.environ.get("CLOUD_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
@@ -562,32 +562,63 @@ async def _transcribe_image(
         return None
 
 
+class VisionRejected(Exception):
+    """Image content hit a tier whose vision policy forbids serving it. The caller
+    turns this into an HTTP 422 with .message so the user can switch tiers."""
+
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
+
+
 async def apply_vision_policy(
     body: dict[str, Any],
     base_url: str,
     model_to_send: str,
     reason: str,
     x_vision: str | None,
-    vision_enabled: bool = True,
+    vision_policy: str = "shim",
 ) -> tuple[str, str, dict[str, Any], str]:
-    """Decide how to handle image content when the target model is text-only.
+    """Handle image content per the tier's vision policy.
 
-    Modes (the `x-vision` request header overrides the VISION_MODE default):
-      local - OCR each image locally (mlx_vlm), feed the text to the text model
-      cloud - reroute the whole request to VISION_CLOUD_MODEL (a multimodal cloud
-              model) with the images left intact, so it sees and answers
-      auto  - OCR locally; if the transcription is thin (< VISION_OCR_MIN_CHARS,
-              i.e. probably a non-text image) escalate to cloud vision, else use
-              the local OCR text
-
-    Returns (base_url, model_to_send, body, reason) - possibly rerouted to cloud.
-    No-op when the target already sees, there are no images, or nothing's configured.
+      native - target sees images itself; pass through untouched
+      shim   - local OCR, may escalate to cloud if thin (VISION_MODE / x-vision)
+      local  - on-machine OCR only; raise VisionRejected if thin or no shim;
+               never escalates to cloud (would break the local pin)
+      reject - any image content -> raise VisionRejected
     """
-    if not vision_enabled:
+    has_images = bool(count_images(body))
+
+    if vision_policy == "native":
         return base_url, model_to_send, body, reason
+
+    if vision_policy == "reject":
+        if has_images:
+            raise VisionRejected(
+                "this model tier has no vision; switch to airwolf/auto or airwolf/deep"
+            )
+        return base_url, model_to_send, body, reason
+
+    if vision_policy == "local":
+        if not has_images:
+            return base_url, model_to_send, body, reason
+        if not VISION_SHIM_MODEL:
+            raise VisionRejected(
+                "airwolf/local has no local OCR configured (VISION_SHIM_MODEL unset); "
+                "switch to airwolf/deep for vision"
+            )
+        shimmed, n_chars = await apply_vision_shim(body)
+        if n_chars < VISION_OCR_MIN_CHARS:
+            raise VisionRejected(
+                "image isn't text-readable locally; switch to airwolf/deep for native vision"
+            )
+        log(f"[router] vision=local-pin: OCR'd image(s) -> {n_chars} chars for {model_to_send}")
+        return base_url, model_to_send, shimmed, f"{reason}+vision-local-pin"
+
+    # vision_policy == "shim" (default): existing behavior, unchanged.
     if is_vision_capable(model_to_send):
         return base_url, model_to_send, body, reason
-    if not count_images(body):
+    if not has_images:
         return base_url, model_to_send, body, reason
     if not (VISION_SHIM_MODEL or VISION_CLOUD_MODEL):
         return base_url, model_to_send, body, reason
@@ -602,21 +633,16 @@ async def apply_vision_policy(
         log(f"[router] vision={why}: reroute image request -> cloud/{VISION_CLOUD_MODEL}")
         return CLOUD_BASE_URL, VISION_CLOUD_MODEL, b, f"vision-{why}"
 
-    # Explicit cloud, or auto/local with no local OCR model configured -> full reroute.
     if mode == "cloud" or not VISION_SHIM_MODEL:
         if VISION_CLOUD_MODEL:
             return _reroute_to_cloud("cloud")
         log("[router] vision=cloud requested but VISION_CLOUD_MODEL unset; image passes through")
         return base_url, model_to_send, body, reason
 
-    # local or auto, with a local OCR model available -> OCR first.
     shimmed, n_chars = await apply_vision_shim(body)
-
     if mode == "local":
         log(f"[router] vision=local: OCR'd image(s) -> {n_chars} chars for {model_to_send}")
         return base_url, model_to_send, shimmed, f"{reason}+vision-local"
-
-    # auto: rich OCR -> keep local text; thin OCR -> escalate to cloud (if configured).
     if n_chars >= VISION_OCR_MIN_CHARS or not VISION_CLOUD_MODEL:
         log(f"[router] vision=auto: OCR {n_chars} chars -> local text for {model_to_send}")
         return base_url, model_to_send, shimmed, f"{reason}+vision-auto-local"
@@ -840,10 +866,18 @@ async def chat_completions(
     # Vision policy: when an image hits a text-only target model, handle it per
     # the local/cloud/auto policy (may reroute to a multimodal cloud model).
     # No-op unless configured; see apply_vision_policy.
-    base_url, model_to_send, body, reason = await apply_vision_policy(
-        body, base_url, model_to_send, reason, x_vision,
-        vision_enabled=(requested_vm.vision if requested_vm else True),
-    )
+    try:
+        base_url, model_to_send, body, reason = await apply_vision_policy(
+            body, base_url, model_to_send, reason, x_vision,
+            vision_policy=(requested_vm.vision if requested_vm else "shim"),
+        )
+    except VisionRejected as e:
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"message": e.message,
+                               "type": "invalid_request_error",
+                               "code": "vision_unsupported"}},
+        )
 
     # stream_options.include_usage: inject on cloud-bound streaming bodies so
     # OpenCode (via @ai-sdk/openai-compatible) reads token counts from the final

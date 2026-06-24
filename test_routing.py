@@ -203,14 +203,68 @@ def test_local_target_for_empty_models_uses_fallback(monkeypatch):
 import asyncio
 
 
-def test_vision_policy_disabled_short_circuits():
-    body = {"messages": [{"role": "user", "content": [
+def _img_body():
+    return {"messages": [{"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
     ]}]}
+
+
+def test_vision_policy_native_passes_through():
+    body = _img_body()
     out = asyncio.run(R.apply_vision_policy(
-        body, R.LOCAL_BASE_URL, "qwen-local", "virtual-local", None, vision_enabled=False
-    ))
-    assert out == (R.LOCAL_BASE_URL, "qwen-local", body, "virtual-local")
+        body, R.CLOUD_BASE_URL, "google/gemini-2.5-pro", "virtual-pinned-cloud",
+        None, vision_policy="native"))
+    assert out == (R.CLOUD_BASE_URL, "google/gemini-2.5-pro", body, "virtual-pinned-cloud")
+
+
+def test_vision_policy_reject_raises_on_image():
+    with pytest.raises(R.VisionRejected):
+        asyncio.run(R.apply_vision_policy(
+            _img_body(), R.CLOUD_BASE_URL, "z-ai/glm-4.7-flash", "virtual-pinned-cloud",
+            None, vision_policy="reject"))
+
+
+def test_vision_policy_reject_passes_through_without_image():
+    body = {"messages": [{"role": "user", "content": "just text"}]}
+    out = asyncio.run(R.apply_vision_policy(
+        body, R.CLOUD_BASE_URL, "z-ai/glm-4.7-flash", "r", None, vision_policy="reject"))
+    assert out == (R.CLOUD_BASE_URL, "z-ai/glm-4.7-flash", body, "r")
+
+
+def test_vision_policy_local_no_shim_raises(monkeypatch):
+    monkeypatch.setattr(R, "VISION_SHIM_MODEL", "")
+    with pytest.raises(R.VisionRejected):
+        asyncio.run(R.apply_vision_policy(
+            _img_body(), R.LOCAL_BASE_URL, "qwen-local", "virtual-pinned-local",
+            None, vision_policy="local"))
+
+
+def test_vision_policy_local_thin_ocr_raises(monkeypatch):
+    monkeypatch.setattr(R, "VISION_SHIM_MODEL", "some-vlm")
+    monkeypatch.setattr(R, "VISION_OCR_MIN_CHARS", 50)
+
+    async def fake_shim(body):
+        return ({"shimmed": True}, 3)  # thin
+    monkeypatch.setattr(R, "apply_vision_shim", fake_shim)
+    with pytest.raises(R.VisionRejected):
+        asyncio.run(R.apply_vision_policy(
+            _img_body(), R.LOCAL_BASE_URL, "qwen-local", "virtual-pinned-local",
+            None, vision_policy="local"))
+
+
+def test_vision_policy_local_rich_ocr_feeds_text(monkeypatch):
+    monkeypatch.setattr(R, "VISION_SHIM_MODEL", "some-vlm")
+    monkeypatch.setattr(R, "VISION_OCR_MIN_CHARS", 10)
+
+    async def fake_shim(body):
+        return ({"shimmed": True}, 200)  # rich
+    monkeypatch.setattr(R, "apply_vision_shim", fake_shim)
+    base, model, new_body, reason = asyncio.run(R.apply_vision_policy(
+        _img_body(), R.LOCAL_BASE_URL, "qwen-local", "virtual-pinned-local",
+        None, vision_policy="local"))
+    assert base == R.LOCAL_BASE_URL
+    assert new_body == {"shimmed": True}
+    assert reason.endswith("vision-local-pin")
 
 
 _SAMPLE_MODELS_PAYLOAD = {"data": [
