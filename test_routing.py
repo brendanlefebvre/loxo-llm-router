@@ -137,12 +137,28 @@ def test_resolve_virtual_known():
     assert vm is not None
     assert vm.id == "airwolf/auto"
     assert vm.cloud_target == "z-ai/glm-5.2"
-    assert vm.vision is True
+    assert vm.vision == "shim"
 
 
 def test_resolve_virtual_unknown_returns_none():
     assert R.resolve_virtual("z-ai/glm-5.2") is None
     assert R.resolve_virtual("") is None
+
+
+def test_default_registry_has_four_tiers_with_policies():
+    reg = R._build_virtual_models()
+    assert set(reg) >= {"airwolf/auto", "airwolf/fast", "airwolf/deep", "airwolf/local"}
+    assert reg["airwolf/auto"].routing == "auto"
+    assert reg["airwolf/auto"].vision == "shim"
+    assert reg["airwolf/fast"].routing == "cloud"
+    assert reg["airwolf/fast"].vision == "reject"
+    assert reg["airwolf/fast"].cloud_target == "z-ai/glm-4.7-flash"
+    assert reg["airwolf/deep"].routing == "cloud"
+    assert reg["airwolf/deep"].vision == "native"
+    assert reg["airwolf/deep"].cloud_target == "google/gemini-2.5-pro"
+    assert reg["airwolf/local"].routing == "local"
+    assert reg["airwolf/local"].vision == "local"
+    assert reg["airwolf/local"].cloud_target is None
 
 
 def test_virtual_small_prompt_routes_local_with_resolved_id():

@@ -39,6 +39,18 @@ Configuration (env vars):
                          "z-ai/glm-5.2").
   AUTO_LOCAL_MODEL       local target for the virtual model; unset = first
                          LOCAL_MODELS entry.
+  FAST_MODEL_ID          virtual id for the pinned-cloud "fast" tier
+                         (default "airwolf/fast").
+  FAST_CLOUD_MODEL       cloud model the fast tier pins to
+                         (default "z-ai/glm-4.7-flash").
+  DEEP_MODEL_ID          virtual id for the pinned-cloud "deep" tier
+                         (default "airwolf/deep").
+  DEEP_CLOUD_MODEL       cloud model the deep tier pins to
+                         (default "google/gemini-2.5-pro").
+  LOCAL_TIER_MODEL_ID    virtual id for the pinned-local tier
+                         (default "airwolf/local").
+  LOCAL_TIER_MODEL       local model the local tier pins to; unset = first
+                         LOCAL_MODELS entry.
   RATE_CARD_TTL          seconds before the live rate card is refreshed
                          (default 86400). Fetch is non-blocking and best-effort.
   RATE_CARD_URL          pricing source (default OpenRouter /api/v1/models).
@@ -107,21 +119,47 @@ class VirtualModel:
     ids are env-overridable; the structure and intent are legible in one place.
     """
     id: str
-    cloud_target: str
+    cloud_target: str | None = None
     local_target: str | None = None
-    vision: bool = True
+    routing: str = "auto"            # "auto" | "cloud" | "local"
+    vision: str = "shim"             # "native" | "shim" | "local" | "reject"
     advertised_context: int = 1_048_576
 
 
-VIRTUAL_MODELS: dict[str, VirtualModel] = {
-    vm.id: vm for vm in (
+def _build_virtual_models() -> dict[str, "VirtualModel"]:
+    return {vm.id: vm for vm in (
         VirtualModel(
             id=os.environ.get("AUTO_MODEL_ID", "airwolf/auto"),
             cloud_target=os.environ.get("AUTO_CLOUD_MODEL", "z-ai/glm-5.2"),
             local_target=os.environ.get("AUTO_LOCAL_MODEL") or None,
+            routing="auto",
+            vision="shim",
         ),
-    )
-}
+        VirtualModel(
+            id=os.environ.get("FAST_MODEL_ID", "airwolf/fast"),
+            cloud_target=os.environ.get("FAST_CLOUD_MODEL", "z-ai/glm-4.7-flash"),
+            routing="cloud",
+            vision="reject",
+            advertised_context=202_752,
+        ),
+        VirtualModel(
+            id=os.environ.get("DEEP_MODEL_ID", "airwolf/deep"),
+            cloud_target=os.environ.get("DEEP_CLOUD_MODEL", "google/gemini-2.5-pro"),
+            routing="cloud",
+            vision="native",
+            advertised_context=1_048_576,
+        ),
+        VirtualModel(
+            id=os.environ.get("LOCAL_TIER_MODEL_ID", "airwolf/local"),
+            cloud_target=None,
+            local_target=os.environ.get("LOCAL_TIER_MODEL") or None,
+            routing="local",
+            vision="local",
+        ),
+    )}
+
+
+VIRTUAL_MODELS: dict[str, VirtualModel] = _build_virtual_models()
 
 
 def resolve_virtual(model_id: str) -> VirtualModel | None:
