@@ -65,10 +65,16 @@ vars (see the `llm_router.py` docstring).
 4. `model` contains `/` → CLOUD
 5. default → LOCAL
 
+Note: `x-quality: best` only affects the `auto` tier (rule 0 / rule 2). The
+pinned tiers (`fast`/`deep`/`local`) return before the header is read, so the
+header is a no-op on them — pick the tier directly (e.g. `airwolf/deep`) instead.
+
 If LOCAL is chosen but the connection fails/times out (`LOCAL_CONNECT_TIMEOUT`,
 default 5s), the request is re-sent to CLOUD with `CLOUD_DEFAULT_MODEL`. This
 is a transport fallback only, not a quality fallback, and only works for
-streaming before the first byte is sent.
+streaming before the first byte is sent. A non-transport upstream error (e.g.
+402/429/5xx) is never masked: streamed responses surface the real status instead
+of a blank HTTP 200.
 
 ## Vision shim (opt-in)
 
