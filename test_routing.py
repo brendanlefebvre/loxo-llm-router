@@ -275,3 +275,23 @@ def test_pinned_local_tier_always_local(monkeypatch):
     assert base == R.LOCAL_BASE_URL
     assert model == "mlx-community/Qwen3.6-35B-A3B-4bit"  # first LOCAL_MODELS entry
     assert reason == "virtual-pinned-local"
+
+
+# --- cloud_fallback_for: suppression policy for pinned-local tier -----------
+
+def test_cloud_fallback_allowed_for_auto_local():
+    vm = R.VirtualModel(id="airwolf/auto", cloud_target="z-ai/glm-5.2", routing="auto")
+    assert R.cloud_fallback_for(R.LOCAL_BASE_URL, vm) is True
+
+
+def test_cloud_fallback_allowed_for_nonvirtual_local():
+    assert R.cloud_fallback_for(R.LOCAL_BASE_URL, None) is True
+
+
+def test_cloud_fallback_suppressed_for_local_pin():
+    vm = R.VirtualModel(id="airwolf/local", routing="local", vision="local")
+    assert R.cloud_fallback_for(R.LOCAL_BASE_URL, vm) is False
+
+
+def test_cloud_fallback_none_when_base_is_cloud():
+    assert R.cloud_fallback_for(R.CLOUD_BASE_URL, None) is False

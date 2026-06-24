@@ -669,6 +669,17 @@ def pick_target(body: dict[str, Any], quality_header: str | None) -> tuple[str, 
     return LOCAL_BASE_URL, model, "default-local"
 
 
+def cloud_fallback_for(base_url: str, vm: "VirtualModel | None") -> bool:
+    """Whether a LOCAL-bound request may transparently fall back to cloud on a
+    transport failure. Suppressed for the pinned-local tier so that an oversized
+    prompt or a down local server hard-fails instead of silently spending cloud."""
+    if base_url != LOCAL_BASE_URL:
+        return False
+    if vm is not None and vm.routing == "local":
+        return False
+    return True
+
+
 def _headers_for(url: str, client_headers: dict[str, str]) -> dict[str, str]:
     h = {
         k: v for k, v in client_headers.items()
@@ -854,11 +865,11 @@ async def chat_completions(
 
     log(f"[router] -> {base_url} model={model_to_send} reason={reason}")
 
-    # Only LOCAL gets a cloud fallback (cloud has no further fallback target).
+    # Only LOCAL gets a cloud fallback; the pinned-local tier opts out (hard-fail).
     fallback_url: str | None = None
     fallback_body: bytes | None = None
-    fallback_cloud_model = requested_vm.cloud_target if requested_vm else CLOUD_DEFAULT_MODEL
-    if base_url == LOCAL_BASE_URL:
+    fallback_cloud_model = (requested_vm.cloud_target if requested_vm else None) or CLOUD_DEFAULT_MODEL
+    if cloud_fallback_for(base_url, requested_vm):
         fb = dict(body)
         fb["model"] = fallback_cloud_model
         if stream:
