@@ -9,10 +9,19 @@ intent heuristics. No build step; a minimal `pytest` covers routing
 
 - Both deployed files are symlinked to this repo:
   `~/bin/llm_router.py` and `~/bin/llm-router-serve.sh` → repo copies.
-  Edits take effect on process restart.
-- Managed by LaunchAgent `com.local.llm-router`. Restart after edits:
-  `launchctl kickstart -k gui/$(id -u)/com.local.llm-router`
-- Logs: `~/Library/Logs/llm-router/out.log` and `err.log`.
+  Edits take effect on process restart. The serve script also reads
+  `llm-router-logconfig.json` by its absolute repo path (uvicorn `--log-config`,
+  UTC-timestamped formatters) — no symlink, but the repo must stay put.
+- Managed by LaunchAgent `com.local.llm-router`. Restart after edits with the
+  gentle method (single trigger via `KeepAlive{Crashed}`, avoids the restart
+  flap): `launchctl kill TERM gui/$(id -u)/com.local.llm-router`. Then poll
+  `/health` until 200 (KeepAlive respawns within the plist's `ThrottleInterval`).
+  Avoid `kickstart -k` — its signal-kill plus `KeepAlive{Crashed}` double-trigger
+  causes a start/shutdown flap.
+- Logs: `~/Library/Logs/llm-router/out.log` and `err.log`. Every line (router's
+  own `[router] …` and uvicorn's startup/access) is prefixed with a UTC ISO-8601
+  timestamp (`2026-06-24T18:08:43Z`); the env var `TZ=UTC` in the serve script
+  keeps uvicorn's `%(asctime)s` in UTC.
 - Interpreter is hardcoded in the serve script:
   `/Users/brendanl/.venvs/mlx/bin/python3`. Deps (install manually):
   `pip install fastapi uvicorn httpx`.
