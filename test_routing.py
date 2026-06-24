@@ -9,6 +9,7 @@ virtual-model branch (see docs/superpowers/specs/2026-06-22-virtual-model-
 abstraction-design.md) can be built without silently regressing existing routes.
 """
 
+import asyncio
 import importlib
 
 import pytest
@@ -137,12 +138,28 @@ def test_resolve_virtual_known():
     assert vm is not None
     assert vm.id == "airwolf/auto"
     assert vm.cloud_target == "z-ai/glm-5.2"
-    assert vm.vision is True
+    assert vm.vision == "shim"
 
 
 def test_resolve_virtual_unknown_returns_none():
     assert R.resolve_virtual("z-ai/glm-5.2") is None
     assert R.resolve_virtual("") is None
+
+
+def test_default_registry_has_four_tiers_with_policies():
+    reg = R._build_virtual_models()
+    assert set(reg) >= {"airwolf/auto", "airwolf/fast", "airwolf/deep", "airwolf/local"}
+    assert reg["airwolf/auto"].routing == "auto"
+    assert reg["airwolf/auto"].vision == "shim"
+    assert reg["airwolf/fast"].routing == "cloud"
+    assert reg["airwolf/fast"].vision == "reject"
+    assert reg["airwolf/fast"].cloud_target == "z-ai/glm-4.7-flash"
+    assert reg["airwolf/deep"].routing == "cloud"
+    assert reg["airwolf/deep"].vision == "native"
+    assert reg["airwolf/deep"].cloud_target == "google/gemini-2.5-pro"
+    assert reg["airwolf/local"].routing == "local"
+    assert reg["airwolf/local"].vision == "local"
+    assert reg["airwolf/local"].cloud_target is None
 
 
 def test_virtual_small_prompt_routes_local_with_resolved_id():
@@ -187,14 +204,68 @@ def test_local_target_for_empty_models_uses_fallback(monkeypatch):
 import asyncio
 
 
-def test_vision_policy_disabled_short_circuits():
-    body = {"messages": [{"role": "user", "content": [
+def _img_body():
+    return {"messages": [{"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
     ]}]}
+
+
+def test_vision_policy_native_passes_through():
+    body = _img_body()
     out = asyncio.run(R.apply_vision_policy(
-        body, R.LOCAL_BASE_URL, "qwen-local", "virtual-local", None, vision_enabled=False
-    ))
-    assert out == (R.LOCAL_BASE_URL, "qwen-local", body, "virtual-local")
+        body, R.CLOUD_BASE_URL, "google/gemini-2.5-pro", "virtual-pinned-cloud",
+        None, vision_policy="native"))
+    assert out == (R.CLOUD_BASE_URL, "google/gemini-2.5-pro", body, "virtual-pinned-cloud")
+
+
+def test_vision_policy_reject_raises_on_image():
+    with pytest.raises(R.VisionRejected):
+        asyncio.run(R.apply_vision_policy(
+            _img_body(), R.CLOUD_BASE_URL, "z-ai/glm-4.7-flash", "virtual-pinned-cloud",
+            None, vision_policy="reject"))
+
+
+def test_vision_policy_reject_passes_through_without_image():
+    body = {"messages": [{"role": "user", "content": "just text"}]}
+    out = asyncio.run(R.apply_vision_policy(
+        body, R.CLOUD_BASE_URL, "z-ai/glm-4.7-flash", "r", None, vision_policy="reject"))
+    assert out == (R.CLOUD_BASE_URL, "z-ai/glm-4.7-flash", body, "r")
+
+
+def test_vision_policy_local_no_shim_raises(monkeypatch):
+    monkeypatch.setattr(R, "VISION_SHIM_MODEL", "")
+    with pytest.raises(R.VisionRejected):
+        asyncio.run(R.apply_vision_policy(
+            _img_body(), R.LOCAL_BASE_URL, "qwen-local", "virtual-pinned-local",
+            None, vision_policy="local"))
+
+
+def test_vision_policy_local_thin_ocr_raises(monkeypatch):
+    monkeypatch.setattr(R, "VISION_SHIM_MODEL", "some-vlm")
+    monkeypatch.setattr(R, "VISION_OCR_MIN_CHARS", 50)
+
+    async def fake_shim(body):
+        return ({"shimmed": True}, 3)  # thin
+    monkeypatch.setattr(R, "apply_vision_shim", fake_shim)
+    with pytest.raises(R.VisionRejected):
+        asyncio.run(R.apply_vision_policy(
+            _img_body(), R.LOCAL_BASE_URL, "qwen-local", "virtual-pinned-local",
+            None, vision_policy="local"))
+
+
+def test_vision_policy_local_rich_ocr_feeds_text(monkeypatch):
+    monkeypatch.setattr(R, "VISION_SHIM_MODEL", "some-vlm")
+    monkeypatch.setattr(R, "VISION_OCR_MIN_CHARS", 10)
+
+    async def fake_shim(body):
+        return ({"shimmed": True}, 200)  # rich
+    monkeypatch.setattr(R, "apply_vision_shim", fake_shim)
+    base, model, new_body, reason = asyncio.run(R.apply_vision_policy(
+        _img_body(), R.LOCAL_BASE_URL, "qwen-local", "virtual-pinned-local",
+        None, vision_policy="local"))
+    assert base == R.LOCAL_BASE_URL
+    assert new_body == {"shimmed": True}
+    assert reason.endswith("vision-local-pin")
 
 
 _SAMPLE_MODELS_PAYLOAD = {"data": [
@@ -235,3 +306,99 @@ def test_virtual_model_entries_shape():
     assert e["object"] == "model"
     assert e["owned_by"] == "airwolf-llm-router"
     assert "context_length" in e
+
+
+def test_pinned_cloud_tier_always_cloud(monkeypatch):
+    monkeypatch.setitem(R.VIRTUAL_MODELS, "airwolf/fast", R.VirtualModel(
+        id="airwolf/fast", cloud_target="z-ai/glm-4.7-flash", routing="cloud", vision="reject"))
+    base, model, reason = R.pick_target(_body(model="airwolf/fast", text="hi"), None)
+    assert base == R.CLOUD_BASE_URL
+    assert model == "z-ai/glm-4.7-flash"  # virtual id NOT forwarded
+    assert reason == "virtual-pinned-cloud"
+    # pinned: size and quality headers do not change the lane
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 1)
+    base2, model2, reason2 = R.pick_target(_body(model="airwolf/fast", text="x" * 1000), "best")
+    assert (base2, model2, reason2) == (R.CLOUD_BASE_URL, "z-ai/glm-4.7-flash", "virtual-pinned-cloud")
+
+
+def test_pinned_local_tier_always_local(monkeypatch):
+    monkeypatch.setitem(R.VIRTUAL_MODELS, "airwolf/local", R.VirtualModel(
+        id="airwolf/local", cloud_target=None, routing="local", vision="local"))
+    # even with x-quality: best and a huge prompt, it stays local
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 1)
+    base, model, reason = R.pick_target(_body(model="airwolf/local", text="x" * 1000), "best")
+    assert base == R.LOCAL_BASE_URL
+    assert model == "mlx-community/Qwen3.6-35B-A3B-4bit"  # first LOCAL_MODELS entry
+    assert reason == "virtual-pinned-local"
+
+
+# --- cloud_fallback_for: suppression policy for pinned-local tier -----------
+
+def test_cloud_fallback_allowed_for_auto_local():
+    vm = R.VirtualModel(id="airwolf/auto", cloud_target="z-ai/glm-5.2", routing="auto")
+    assert R.cloud_fallback_for(R.LOCAL_BASE_URL, vm) is True
+
+
+def test_cloud_fallback_allowed_for_nonvirtual_local():
+    assert R.cloud_fallback_for(R.LOCAL_BASE_URL, None) is True
+
+
+def test_cloud_fallback_suppressed_for_local_pin():
+    vm = R.VirtualModel(id="airwolf/local", routing="local", vision="local")
+    assert R.cloud_fallback_for(R.LOCAL_BASE_URL, vm) is False
+
+
+def test_cloud_fallback_none_when_base_is_cloud():
+    assert R.cloud_fallback_for(R.CLOUD_BASE_URL, None) is False
+
+
+def test_distinct_cloud_targets_excludes_none(monkeypatch):
+    monkeypatch.setattr(R, "VIRTUAL_MODELS", {
+        "a": R.VirtualModel(id="a", cloud_target="z-ai/glm-5.2", routing="auto"),
+        "f": R.VirtualModel(id="f", cloud_target="z-ai/glm-4.7-flash", routing="cloud"),
+        "l": R.VirtualModel(id="l", cloud_target=None, routing="local"),
+    })
+    assert R._distinct_cloud_targets() == {"z-ai/glm-5.2", "z-ai/glm-4.7-flash"}
+
+
+# --- _local_pin_preflight: F1 clean 422 for pinned-local hard-fails ----------
+
+def test_local_preflight_oversize_returns_422(monkeypatch):
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 10)
+    vm = R.VirtualModel(id="airwolf/local", routing="local", vision="local")
+    body = _body(model="airwolf/local", text="x" * 1000)  # ~250 tokens > 10
+    resp = asyncio.run(R._local_pin_preflight(body, vm))
+    assert resp is not None
+    assert resp.status_code == 422
+
+
+def test_local_preflight_passes_for_non_local_vm():
+    vm = R.VirtualModel(id="airwolf/auto", cloud_target="z-ai/glm-5.2", routing="auto")
+    assert asyncio.run(R._local_pin_preflight(_body(model="airwolf/auto"), vm)) is None
+
+
+def test_local_preflight_passes_for_no_vm():
+    assert asyncio.run(R._local_pin_preflight(_body(model="x"), None)) is None
+
+
+def test_local_preflight_unreachable_returns_422(monkeypatch):
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 1_000_000)  # not oversize
+
+    class _Boom:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, *a, **k): raise R.httpx.ConnectError("down")
+
+    monkeypatch.setattr(R.httpx, "AsyncClient", _Boom)
+    vm = R.VirtualModel(id="airwolf/local", routing="local", vision="local")
+    resp = asyncio.run(R._local_pin_preflight(_body(model="airwolf/local", text="hi"), vm))
+    assert resp is not None
+    assert resp.status_code == 422
+
+
+# --- F3: local tier advertises real context limit ----------------------------
+
+def test_local_tier_advertises_local_context_limit():
+    reg = R._build_virtual_models()
+    assert reg["airwolf/local"].advertised_context == R.LOCAL_CONTEXT_LIMIT

@@ -37,11 +37,28 @@ declares one honest `airwolf/auto` entry with `attachment: true` (true of the
 pipeline — the router shims/reroutes images) instead of lying about a specific
 model. Override ids via `AUTO_MODEL_ID` / `AUTO_CLOUD_MODEL` / `AUTO_LOCAL_MODEL`.
 
+### Tiers (archetypes)
+
+Beyond the default `airwolf/auto`, the registry advertises three pinned tiers so
+client agents can pick a cost/quality lane per task:
+
+| Tier | routing | target | vision |
+|---|---|---|---|
+| `airwolf/auto` | local-first, escalate on size/`best` | local → `z-ai/glm-5.2` | shim |
+| `airwolf/fast` | pinned cloud | `z-ai/glm-4.7-flash` | reject images (422) |
+| `airwolf/deep` | pinned cloud | `google/gemini-2.5-pro` | native |
+| `airwolf/local` | pinned local, **hard-fail** (no cloud fallback) | first `LOCAL_MODELS` | local OCR only, else 422 |
+
+Pinned-local hard-fails (oversized prompt, local down, or unreadable image)
+return HTTP 422 with a message naming the remedy — switch to `airwolf/auto` or
+`airwolf/deep`. Override ids/targets via `FAST_*`, `DEEP_*`, `LOCAL_TIER_*` env
+vars (see the `llm_router.py` docstring).
+
 ## Routing rules (first match wins)
 
-0. `model` matches a `VIRTUAL_MODELS` id → resolve via rules below, substituting
-   the real upstream id (`x-quality: best` or oversized prompt → `cloud_target`,
-   else local target)
+0. `model` matches a `VIRTUAL_MODELS` id → resolve by its `routing` policy:
+   `cloud` (pinned cloud target), `local` (pinned local, no cloud fallback), or
+   `auto` (`x-quality: best` or oversized prompt → `cloud_target`, else local).
 1. `model` matches a `LOCAL_MODELS` tag → LOCAL
 2. `x-quality: best` header → CLOUD
 3. estimated prompt > `LOCAL_CONTEXT_LIMIT` tokens → CLOUD
