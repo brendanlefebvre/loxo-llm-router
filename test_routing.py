@@ -9,6 +9,7 @@ virtual-model branch (see docs/superpowers/specs/2026-06-22-virtual-model-
 abstraction-design.md) can be built without silently regressing existing routes.
 """
 
+import asyncio
 import importlib
 
 import pytest
@@ -358,3 +359,46 @@ def test_distinct_cloud_targets_excludes_none(monkeypatch):
         "l": R.VirtualModel(id="l", cloud_target=None, routing="local"),
     })
     assert R._distinct_cloud_targets() == {"z-ai/glm-5.2", "z-ai/glm-4.7-flash"}
+
+
+# --- _local_pin_preflight: F1 clean 422 for pinned-local hard-fails ----------
+
+def test_local_preflight_oversize_returns_422(monkeypatch):
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 10)
+    vm = R.VirtualModel(id="airwolf/local", routing="local", vision="local")
+    body = _body(model="airwolf/local", text="x" * 1000)  # ~250 tokens > 10
+    resp = asyncio.run(R._local_pin_preflight(body, vm))
+    assert resp is not None
+    assert resp.status_code == 422
+
+
+def test_local_preflight_passes_for_non_local_vm():
+    vm = R.VirtualModel(id="airwolf/auto", cloud_target="z-ai/glm-5.2", routing="auto")
+    assert asyncio.run(R._local_pin_preflight(_body(model="airwolf/auto"), vm)) is None
+
+
+def test_local_preflight_passes_for_no_vm():
+    assert asyncio.run(R._local_pin_preflight(_body(model="x"), None)) is None
+
+
+def test_local_preflight_unreachable_returns_422(monkeypatch):
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 1_000_000)  # not oversize
+
+    class _Boom:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, *a, **k): raise R.httpx.ConnectError("down")
+
+    monkeypatch.setattr(R.httpx, "AsyncClient", _Boom)
+    vm = R.VirtualModel(id="airwolf/local", routing="local", vision="local")
+    resp = asyncio.run(R._local_pin_preflight(_body(model="airwolf/local", text="hi"), vm))
+    assert resp is not None
+    assert resp.status_code == 422
+
+
+# --- F3: local tier advertises real context limit ----------------------------
+
+def test_local_tier_advertises_local_context_limit():
+    reg = R._build_virtual_models()
+    assert reg["airwolf/local"].advertised_context == R.LOCAL_CONTEXT_LIMIT
