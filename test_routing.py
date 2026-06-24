@@ -349,3 +349,12 @@ def test_cloud_fallback_suppressed_for_local_pin():
 
 def test_cloud_fallback_none_when_base_is_cloud():
     assert R.cloud_fallback_for(R.CLOUD_BASE_URL, None) is False
+
+
+def test_distinct_cloud_targets_excludes_none(monkeypatch):
+    monkeypatch.setattr(R, "VIRTUAL_MODELS", {
+        "a": R.VirtualModel(id="a", cloud_target="z-ai/glm-5.2", routing="auto"),
+        "f": R.VirtualModel(id="f", cloud_target="z-ai/glm-4.7-flash", routing="cloud"),
+        "l": R.VirtualModel(id="l", cloud_target=None, routing="local"),
+    })
+    assert R._distinct_cloud_targets() == {"z-ai/glm-5.2", "z-ai/glm-4.7-flash"}

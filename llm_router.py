@@ -314,13 +314,18 @@ def _parse_rate_card(models_payload: dict[str, Any], target_id: str) -> dict[str
     return None
 
 
+def _distinct_cloud_targets() -> set[str]:
+    """Every non-None cloud_target in the registry (local-pinned tiers have none)."""
+    return {vm.cloud_target for vm in VIRTUAL_MODELS.values() if vm.cloud_target}
+
+
 async def get_rate_cards() -> dict[str, dict[str, Any]]:
     """Fetch + cache rate cards for every distinct cloud_target. Best-effort:
     on any failure, leaves the existing cache untouched and returns it."""
     global _rate_cards_fetched_at
     import time
     async with _rate_card_lock:
-        targets = {vm.cloud_target for vm in VIRTUAL_MODELS.values()}
+        targets = _distinct_cloud_targets()
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 r = await client.get(RATE_CARD_URL)
@@ -339,7 +344,7 @@ async def get_rate_cards() -> dict[str, dict[str, Any]]:
             # Self-check: a virtual model declaring vision whose cloud_target is
             # text-only needs the shim. Assert the former config lie in code.
             for vm in VIRTUAL_MODELS.values():
-                if vm.cloud_target == t and vm.vision and card.get("input_modalities") == ["text"]:
+                if vm.cloud_target == t and vm.vision == "shim" and card.get("input_modalities") == ["text"]:
                     log(f"[router] vision shim required for cloud_target {t} (text-only)")
 
         if cards:
