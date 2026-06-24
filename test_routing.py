@@ -479,3 +479,56 @@ def test_forward_stream_200_passes_chunks(monkeypatch):
     assert b"".join(got) == b"".join(chunks)
     assert resp.closed is True                     # finally closed the response
     assert clients and clients[0].closed is True   # and the client
+
+
+# --- forward(): fall back to cloud when local crashes/disconnects (F-A) -------
+
+def _client_factory_fail_then_ok(exc, ok_resp, sink=None):
+    """Fake httpx.AsyncClient whose first send() raises `exc` and whose second
+    send() returns `ok_resp` — models a local server that disconnects, then a
+    healthy cloud fallback."""
+    class _C:
+        def __init__(self, *a, **k):
+            self.closed = False
+            self.calls = 0
+            if sink is not None:
+                sink.append(self)
+
+        def build_request(self, *a, **k):
+            return ("request",)
+
+        async def send(self, request, stream=False):
+            self.calls += 1
+            if self.calls == 1:
+                raise exc
+            return ok_resp
+
+        async def aclose(self):
+            self.closed = True
+    return _C
+
+
+def test_remote_protocol_error_is_a_fallback_trigger():
+    # A local server that OOMs mid-prompt "disconnects without sending a
+    # response" (RemoteProtocolError); that must count as wedged -> fall back.
+    assert R.httpx.RemoteProtocolError in R.FALLBACK_ERRORS
+
+
+def test_forward_stream_falls_back_on_remote_protocol_error(monkeypatch):
+    ok = _FakeResp(200, chunks=[b"data: hi\n\n"])
+    exc = R.httpx.RemoteProtocolError("Server disconnected without sending a response")
+    clients = []
+    monkeypatch.setattr(R.httpx, "AsyncClient", _client_factory_fail_then_ok(exc, ok, clients))
+
+    async def _run():
+        out = await R.forward(
+            R.LOCAL_BASE_URL, "/chat/completions", b"{}", {}, True,
+            fallback_url=R.CLOUD_BASE_URL, fallback_body=b"{}",
+            cloud_model=None, cloud_provider=None, reason="virtual-local",
+            fallback_cloud_model="z-ai/glm-5.2")
+        return out, [c async for c in out.body_iterator]
+
+    out, got = asyncio.run(_run())
+    assert isinstance(out, R.StreamingResponse)
+    assert b"".join(got) == b"data: hi\n\n"        # fallback response streamed
+    assert clients[0].calls == 2                    # primary raised, fallback used
