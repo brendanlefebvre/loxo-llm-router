@@ -251,3 +251,27 @@ def test_virtual_model_entries_shape():
     assert e["object"] == "model"
     assert e["owned_by"] == "airwolf-llm-router"
     assert "context_length" in e
+
+
+def test_pinned_cloud_tier_always_cloud(monkeypatch):
+    monkeypatch.setitem(R.VIRTUAL_MODELS, "airwolf/fast", R.VirtualModel(
+        id="airwolf/fast", cloud_target="z-ai/glm-4.7-flash", routing="cloud", vision="reject"))
+    base, model, reason = R.pick_target(_body(model="airwolf/fast", text="hi"), None)
+    assert base == R.CLOUD_BASE_URL
+    assert model == "z-ai/glm-4.7-flash"  # virtual id NOT forwarded
+    assert reason == "virtual-pinned-cloud"
+    # pinned: size and quality headers do not change the lane
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 1)
+    base2, model2, reason2 = R.pick_target(_body(model="airwolf/fast", text="x" * 1000), "best")
+    assert (base2, model2, reason2) == (R.CLOUD_BASE_URL, "z-ai/glm-4.7-flash", "virtual-pinned-cloud")
+
+
+def test_pinned_local_tier_always_local(monkeypatch):
+    monkeypatch.setitem(R.VIRTUAL_MODELS, "airwolf/local", R.VirtualModel(
+        id="airwolf/local", cloud_target=None, routing="local", vision="local"))
+    # even with x-quality: best and a huge prompt, it stays local
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 1)
+    base, model, reason = R.pick_target(_body(model="airwolf/local", text="x" * 1000), "best")
+    assert base == R.LOCAL_BASE_URL
+    assert model == "mlx-community/Qwen3.6-35B-A3B-4bit"  # first LOCAL_MODELS entry
+    assert reason == "virtual-pinned-local"

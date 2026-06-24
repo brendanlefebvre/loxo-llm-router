@@ -643,6 +643,11 @@ def pick_target(body: dict[str, Any], quality_header: str | None) -> tuple[str, 
 
     vm = resolve_virtual(model)
     if vm is not None:
+        if vm.routing == "cloud":
+            return CLOUD_BASE_URL, vm.cloud_target, "virtual-pinned-cloud"
+        if vm.routing == "local":
+            return LOCAL_BASE_URL, local_target_for(vm, model), "virtual-pinned-local"
+        # routing == "auto"
         if (quality_header or "").lower() == "best":
             return CLOUD_BASE_URL, vm.cloud_target, "virtual-quality-best"
         if estimate_prompt_tokens(body) > LOCAL_CONTEXT_LIMIT:
