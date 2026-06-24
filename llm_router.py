@@ -789,54 +789,82 @@ async def forward(
     """
 
     if stream:
-        async def streamer():
-            client = httpx.AsyncClient(timeout=TIMEOUT)
-            served_cloud_model = cloud_model
-            served_cloud_provider = cloud_provider
-            served_reason = reason
+        client = httpx.AsyncClient(timeout=TIMEOUT)
+        url, body = primary_url, primary_body
+        served_cloud_model = cloud_model
+        served_cloud_provider = cloud_provider
+        served_reason = reason
+        can_fallback = fallback_url is not None
+        # Connect first (with pre-first-byte transport fallback), THEN peek the
+        # upstream status before committing to a StreamingResponse. A generator
+        # can only yield bytes — it can't set the HTTP status — so a non-200
+        # (402 unfunded, 429, provider 5xx, a local error) must be caught here,
+        # else it would surface to the client as a masked HTTP 200 carrying the
+        # error body as if it were SSE. Mirrors the non-streaming path below.
+        while True:
             try:
-                url, body = primary_url, primary_body
-                can_fallback = fallback_url is not None
-                while True:
-                    yielded = False
-                    try:
-                        async with client.stream(
-                            "POST", f"{url}{path}", content=body,
-                            headers=_headers_for(url, client_headers),
-                        ) as resp:
-                            buf = b""
-                            cost_found: float | None = None
-                            async for chunk in resp.aiter_raw():
-                                yielded = True
-                                yield chunk
-                                # Tee: scan for the terminal SSE usage chunk.
-                                if served_cloud_model:
-                                    buf += chunk
-                                    # Process complete lines; keep partial tail.
-                                    while b"\n" in buf:
-                                        line, buf = buf.split(b"\n", 1)
-                                        c = _extract_cost_from_sse_line(line)
-                                        if c is not None:
-                                            cost_found = c
-                            if served_cloud_model and served_cloud_provider and cost_found is not None:
-                                asyncio.ensure_future(
-                                    record_cost(served_cloud_provider, served_cloud_model,
-                                                cost_found, stream=True, reason=served_reason)
-                                )
-                        return
-                    except FALLBACK_ERRORS:
-                        if can_fallback and not yielded:
-                            fb_model = fallback_cloud_model or CLOUD_DEFAULT_MODEL
-                            log(f"[router] stream: {url} unreachable pre-first-byte, "
-                                f"falling back to cloud/{fb_model}")
-                            url, body = fallback_url, fallback_body  # type: ignore[assignment]
-                            served_cloud_model = fb_model
-                            served_cloud_provider = _provider_host(CLOUD_BASE_URL)
-                            served_reason = "fallback"
-                            can_fallback = False
-                            continue
-                        raise
+                resp = await client.send(
+                    client.build_request(
+                        "POST", f"{url}{path}", content=body,
+                        headers=_headers_for(url, client_headers),
+                    ),
+                    stream=True,
+                )
+            except FALLBACK_ERRORS:
+                if can_fallback:
+                    fb_model = fallback_cloud_model or CLOUD_DEFAULT_MODEL
+                    log(f"[router] stream: {url} unreachable pre-first-byte, "
+                        f"falling back to cloud/{fb_model}")
+                    url, body = fallback_url, fallback_body  # type: ignore[assignment]
+                    served_cloud_model = fb_model
+                    served_cloud_provider = _provider_host(CLOUD_BASE_URL)
+                    served_reason = "fallback"
+                    can_fallback = False
+                    continue
+                await client.aclose()
+                raise
+            break
+
+        if resp.status_code != 200:
+            err = await resp.aread()
+            await resp.aclose()
+            await client.aclose()
+            try:
+                content = json.loads(err)
+            except Exception:
+                text = err.decode("utf-8", "replace")
+                if len(text) > 2000:
+                    text = text[:2000] + "…(truncated)"
+                content = {"error": {
+                    "message": text or "upstream error",
+                    "type": "upstream_error",
+                }}
+            log(f"[router] stream: upstream {url} returned {resp.status_code}; "
+                f"surfacing status (no masked 200)")
+            return JSONResponse(status_code=resp.status_code, content=content)
+
+        async def streamer():
+            try:
+                buf = b""
+                cost_found: float | None = None
+                async for chunk in resp.aiter_raw():
+                    yield chunk
+                    # Tee: scan for the terminal SSE usage chunk.
+                    if served_cloud_model:
+                        buf += chunk
+                        # Process complete lines; keep partial tail.
+                        while b"\n" in buf:
+                            line, buf = buf.split(b"\n", 1)
+                            c = _extract_cost_from_sse_line(line)
+                            if c is not None:
+                                cost_found = c
+                if served_cloud_model and served_cloud_provider and cost_found is not None:
+                    asyncio.ensure_future(
+                        record_cost(served_cloud_provider, served_cloud_model,
+                                    cost_found, stream=True, reason=served_reason)
+                    )
             finally:
+                await resp.aclose()
                 await client.aclose()
         return StreamingResponse(streamer(), media_type="text/event-stream")
 

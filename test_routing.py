@@ -402,3 +402,80 @@ def test_local_preflight_unreachable_returns_422(monkeypatch):
 def test_local_tier_advertises_local_context_limit():
     reg = R._build_virtual_models()
     assert reg["airwolf/local"].advertised_context == R.LOCAL_CONTEXT_LIMIT
+
+
+# --- forward(): streaming surfaces upstream non-200 (no masked HTTP 200) ------
+
+class _FakeResp:
+    def __init__(self, status_code, chunks=None, body=b""):
+        self.status_code = status_code
+        self._chunks = list(chunks or [])
+        self._body = body
+        self.closed = False
+
+    async def aread(self):
+        return self._body
+
+    async def aiter_raw(self):
+        for c in self._chunks:
+            yield c
+
+    async def aclose(self):
+        self.closed = True
+
+
+def _client_factory(resp, sink=None):
+    """Fake httpx.AsyncClient bound to one canned response, supporting the
+    build_request()/send() streaming API used by forward(). If `sink` is given,
+    each constructed client is appended to it so a test can assert it was closed."""
+    class _C:
+        def __init__(self, *a, **k):
+            self.closed = False
+            if sink is not None:
+                sink.append(self)
+
+        def build_request(self, *a, **k):
+            return ("request",)
+
+        async def send(self, request, stream=False):
+            return resp
+
+        async def aclose(self):
+            self.closed = True
+    return _C
+
+
+def test_forward_stream_non200_surfaces_status(monkeypatch):
+    # A streamed cloud request whose upstream 402s must surface as 402, not a
+    # masked HTTP 200 carrying the error body as if it were SSE.
+    resp = _FakeResp(402, body=b'{"error":{"message":"Insufficient credits","code":402}}')
+    clients = []
+    monkeypatch.setattr(R.httpx, "AsyncClient", _client_factory(resp, clients))
+    out = asyncio.run(R.forward(
+        R.CLOUD_BASE_URL, "/chat/completions", b"{}", {}, True,
+        cloud_model="z-ai/glm-4.7-flash", cloud_provider="openrouter.ai",
+        reason="virtual-pinned-cloud"))
+    assert isinstance(out, R.JSONResponse)
+    assert out.status_code == 402
+    assert b"Insufficient credits" in out.body
+    assert resp.closed is True                     # response drained + closed
+    assert clients and clients[0].closed is True   # client not leaked
+
+
+def test_forward_stream_200_passes_chunks(monkeypatch):
+    chunks = [b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n', b'data: [DONE]\n\n']
+    resp = _FakeResp(200, chunks=chunks)
+    clients = []
+    monkeypatch.setattr(R.httpx, "AsyncClient", _client_factory(resp, clients))
+
+    async def _run():
+        out = await R.forward(
+            R.CLOUD_BASE_URL, "/chat/completions", b"{}", {}, True,
+            cloud_model=None, cloud_provider=None, reason="x")
+        assert isinstance(out, R.StreamingResponse)
+        return out, [c async for c in out.body_iterator]
+
+    out, got = asyncio.run(_run())
+    assert b"".join(got) == b"".join(chunks)
+    assert resp.closed is True                     # finally closed the response
+    assert clients and clients[0].closed is True   # and the client
