@@ -532,3 +532,32 @@ def test_forward_stream_falls_back_on_remote_protocol_error(monkeypatch):
     assert isinstance(out, R.StreamingResponse)
     assert b"".join(got) == b"data: hi\n\n"        # fallback response streamed
     assert clients[0].calls == 2                    # primary raised, fallback used
+
+
+# --- log timestamps (UTC ISO-8601) -------------------------------------------
+
+def test_ts_is_utc_iso8601_z():
+    from datetime import datetime
+    ts = R._ts()
+    assert ts.endswith("Z")
+    datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")  # parses or raises
+
+
+def test_log_prepends_utc_timestamp(capsys, monkeypatch):
+    from datetime import datetime
+    monkeypatch.setattr(R, "QUIET", False)
+    R.log("[router] hello")
+    out = capsys.readouterr().out.strip()
+    assert out.endswith("[router] hello")
+    ts = out.split(" ", 1)[0]
+    assert ts.endswith("Z")
+    datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_uvicorn_logconfig_valid_and_timestamped():
+    import json, pathlib
+    cfg = json.loads(pathlib.Path("llm-router-logconfig.json").read_text())
+    for name in ("default", "access"):
+        fmt = cfg["formatters"][name]
+        assert "%(asctime)s" in fmt["fmt"]
+        assert fmt["datefmt"] == "%Y-%m-%dT%H:%M:%SZ"

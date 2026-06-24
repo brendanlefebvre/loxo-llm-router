@@ -101,6 +101,12 @@ import httpx
 from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+
+def _ts() -> str:
+    """UTC ISO-8601 timestamp (second resolution, trailing Z) for log lines."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 LOCAL_BASE_URL = os.environ.get("LOCAL_BASE_URL", "http://localhost:7979/v1").rstrip("/")
 CLOUD_BASE_URL = os.environ.get("CLOUD_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -242,7 +248,7 @@ def _seed_spend_from_ledger() -> None:
         if earliest:
             _spend_since = earliest
     except Exception as e:
-        print(f"[router] spend ledger seed failed ({e}); starting fresh")
+        print(f"{_ts()} [router] spend ledger seed failed ({e}); starting fresh", flush=True)
 
 
 _seed_spend_from_ledger()
@@ -428,7 +434,7 @@ app = FastAPI()
 
 def log(msg: str) -> None:
     if not QUIET:
-        print(msg)
+        print(f"{_ts()} {msg}", flush=True)
 
 
 def auth_failed(authorization: str | None) -> Response | None:
