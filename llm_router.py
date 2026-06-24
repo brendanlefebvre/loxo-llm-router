@@ -416,6 +416,11 @@ FALLBACK_ERRORS = (
     httpx.ReadError,
     httpx.ReadTimeout,
     httpx.PoolTimeout,
+    # A local server that crashes/OOMs mid-prompt "disconnects without sending a
+    # response" — i.e. wedged, not just down. The auto tier should degrade to
+    # cloud rather than hard-fail. (Pre-first-byte only; a mid-stream disconnect
+    # can't be transparently restarted.)
+    httpx.RemoteProtocolError,
 )
 
 app = FastAPI()
