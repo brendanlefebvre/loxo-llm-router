@@ -561,3 +561,52 @@ def test_uvicorn_logconfig_valid_and_timestamped():
         fmt = cfg["formatters"][name]
         assert "%(asctime)s" in fmt["fmt"]
         assert fmt["datefmt"] == "%Y-%m-%dT%H:%M:%SZ"
+
+
+# --- new dispatch tiers: balanced + reason (2026-06-25 spec) ------------------
+
+def test_balanced_tier_resolves_with_policies():
+    reg = R._build_virtual_models()
+    assert "airwolf/balanced" in reg
+    vm = reg["airwolf/balanced"]
+    assert vm.cloud_target == "z-ai/glm-5.2"
+    assert vm.routing == "cloud"
+    assert vm.vision == "shim"
+    assert vm.advertised_context == 1_048_576
+
+
+def test_reason_tier_resolves_with_policies():
+    reg = R._build_virtual_models()
+    assert "airwolf/reason" in reg
+    vm = reg["airwolf/reason"]
+    assert vm.cloud_target == "moonshotai/kimi-k2.6"
+    assert vm.routing == "cloud"
+    assert vm.vision == "native"
+    assert vm.advertised_context == 262_144
+
+
+def test_balanced_tier_routes_cloud_target(monkeypatch):
+    monkeypatch.setitem(R.VIRTUAL_MODELS, "airwolf/balanced", R.VirtualModel(
+        id="airwolf/balanced", cloud_target="z-ai/glm-5.2", routing="cloud", vision="shim"))
+    base, model, reason = R.pick_target(_body(model="airwolf/balanced", text="hi"), None)
+    assert base == R.CLOUD_BASE_URL
+    assert model == "z-ai/glm-5.2"
+    assert reason == "virtual-pinned-cloud"
+
+
+def test_reason_tier_routes_cloud_target(monkeypatch):
+    monkeypatch.setitem(R.VIRTUAL_MODELS, "airwolf/reason", R.VirtualModel(
+        id="airwolf/reason", cloud_target="moonshotai/kimi-k2.6",
+        routing="cloud", vision="native"))
+    base, model, reason = R.pick_target(_body(model="airwolf/reason", text="hi"), None)
+    assert base == R.CLOUD_BASE_URL
+    assert model == "moonshotai/kimi-k2.6"
+    assert reason == "virtual-pinned-cloud"
+
+
+def test_new_tiers_priced_via_distinct_cloud_targets(monkeypatch):
+    # /health prices every distinct cloud target in the registry.
+    monkeypatch.setattr(R, "VIRTUAL_MODELS", R._build_virtual_models())
+    targets = R._distinct_cloud_targets()
+    assert "z-ai/glm-5.2" in targets
+    assert "moonshotai/kimi-k2.6" in targets

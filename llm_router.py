@@ -47,6 +47,14 @@ Configuration (env vars):
                          (default "airwolf/deep").
   DEEP_CLOUD_MODEL       cloud model the deep tier pins to
                          (default "google/gemini-2.5-pro").
+  BALANCED_MODEL_ID      virtual id for the pinned-cloud "balanced" tier
+                         (default "airwolf/balanced").
+  BALANCED_CLOUD_MODEL   cloud model the balanced tier pins to
+                         (default "z-ai/glm-5.2").
+  REASON_MODEL_ID        virtual id for the pinned-cloud "reason" tier
+                         (default "airwolf/reason").
+  REASON_CLOUD_MODEL     cloud model the reason tier pins to
+                         (default "moonshotai/kimi-k2.6").
   LOCAL_TIER_MODEL_ID    virtual id for the pinned-local tier
                          (default "airwolf/local").
   LOCAL_TIER_MODEL       local model the local tier pins to; unset = first
@@ -155,6 +163,20 @@ def _build_virtual_models() -> dict[str, "VirtualModel"]:
             routing="cloud",
             vision="native",
             advertised_context=1_048_576,
+        ),
+        VirtualModel(
+            id=os.environ.get("BALANCED_MODEL_ID", "airwolf/balanced"),
+            cloud_target=os.environ.get("BALANCED_CLOUD_MODEL", "z-ai/glm-5.2"),
+            routing="cloud",
+            vision="shim",
+            advertised_context=1_048_576,
+        ),
+        VirtualModel(
+            id=os.environ.get("REASON_MODEL_ID", "airwolf/reason"),
+            cloud_target=os.environ.get("REASON_CLOUD_MODEL", "moonshotai/kimi-k2.6"),
+            routing="cloud",
+            vision="native",
+            advertised_context=262_144,
         ),
         VirtualModel(
             id=os.environ.get("LOCAL_TIER_MODEL_ID", "airwolf/local"),
