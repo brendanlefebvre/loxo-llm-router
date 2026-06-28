@@ -14,7 +14,7 @@ import importlib
 
 import pytest
 
-import llm_router as R
+import loxo_llm_router as R
 
 
 @pytest.fixture(autouse=True)
