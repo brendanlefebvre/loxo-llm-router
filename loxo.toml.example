@@ -1,0 +1,54 @@
+# loxo-llm-router configuration.
+# Precedence: bundled defaults < this file < environment variables.
+# Secrets (OPENROUTER_API_KEY, ROUTER_TOKEN) are read ONLY from the environment.
+# Search order: $LOXO_CONFIG -> ./loxo.toml -> ~/.config/loxo-llm-router/loxo.toml
+
+namespace = "loxo"            # tier ids become loxo/auto, loxo/fast, ... ; ROUTER_NS env overrides
+
+[server]
+host = "0.0.0.0"
+port = 9090
+
+[backends]
+local_base_url = "http://localhost:7979/v1"   # MLX / Ollama / llama.cpp / vLLM / LM Studio
+cloud_base_url = "https://openrouter.ai/api/v1"
+local_models = ["mlx-community/Qwen3.6-35B-A3B-4bit"]   # first entry = default local target
+local_context_limit = 60000
+cloud_default_model = "anthropic/claude-sonnet-4.6"
+
+# Each [tiers.<key>] becomes the virtual id "<namespace>/<key>".
+# advertised_context is surfaced as context_length in /v1/models.
+[tiers.auto]
+routing = "auto"              # local-first; escalate on size / x-quality: best
+cloud_target = "z-ai/glm-5.2"
+vision = "shim"
+advertised_context = 1048576
+
+[tiers.fast]
+routing = "cloud"
+cloud_target = "z-ai/glm-4.7-flash"
+vision = "reject"
+advertised_context = 202752
+
+[tiers.balanced]
+routing = "cloud"
+cloud_target = "z-ai/glm-5.2"
+vision = "shim"
+advertised_context = 1048576
+
+[tiers.reason]
+routing = "cloud"
+cloud_target = "moonshotai/kimi-k2.6"
+vision = "native"
+advertised_context = 262144
+
+[tiers.deep]
+routing = "cloud"
+cloud_target = "google/gemini-2.5-pro"
+vision = "native"
+advertised_context = 1048576
+
+[tiers.local]
+routing = "local"            # pinned local, hard-fail (no cloud fallback)
+vision = "local"
+# advertised_context omitted → defaults to local_context_limit

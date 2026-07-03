@@ -1,30 +1,88 @@
-# llm-router
+# loxo-llm-router
 
-OpenAI-compatible proxy that dispatches each request to a **local** (MLX /
-`mlx_vlm`) endpoint or a **cloud** (OpenRouter) endpoint based on
-intent-expressing heuristics — not retry-on-failure.
+An OpenAI-compatible router that dispatches each request to a **local** (MLX,
+Ollama, llama.cpp, vLLM, LM Studio — anything OpenAI-compatible) or **cloud**
+(OpenRouter) backend based on **intent-expressing heuristics**, not
+retry-on-failure. Clients send one virtual model id; the router resolves it to
+the right backend and model.
 
-Part of the local AI inference stack on the Mac Mini:
-`mlx_vlm (:7979)` → `llm_router (:9090)` → OpenCode / any OpenAI-compatible client.
+```
+clients ──▶ loxo-llm-router (:9090/v1) ──┬──▶ local model server (:7979/v1)
+                                         └──▶ OpenRouter (cloud)
+```
 
-## Files
-- `llm_router.py` — FastAPI proxy, run via uvicorn on `0.0.0.0:9090`
-- `llm-router-serve.sh` — launch wrapper (invoked by the `com.local.llm-router` LaunchAgent)
+## Install & run
+
+```bash
+pip install .                 # Python >= 3.11
+export OPENROUTER_API_KEY=sk-or-...
+loxo-llm-router               # serves on 0.0.0.0:9090 with bundled defaults
+```
+
+Docker:
+
+```bash
+cp .env.example loxo.env      # add your OPENROUTER_API_KEY
+docker compose up --build
+```
+
+## Configure
+
+Configuration layers, lowest to highest precedence:
+
+1. **bundled defaults** — runs out of the box
+2. **`loxo.toml`** — your tier catalog + app settings (copy `loxo.toml.example`)
+3. **environment** — overrides scalars, and is the **only** place for secrets
+
+Config-file search order: `$LOXO_CONFIG` → `./loxo.toml` →
+`~/.config/loxo-llm-router/loxo.toml`. See `loxo.toml.example` for the full
+schema and `.env.example` for environment options.
+
+**Secrets** (`OPENROUTER_API_KEY`, `ROUTER_TOKEN`) are read only from the
+environment — never put them in `loxo.toml`.
+
+**Host/port** resolve `LOXO_HOST`/`LOXO_PORT` → bare `HOST`/`PORT` → `[server]`
+in `loxo.toml` → default `0.0.0.0:9090`. The bare `PORT` is honored so platforms
+that inject it (Heroku, Cloud Run, Railway) work with no extra config; set
+`LOXO_PORT` to force a value regardless of any platform-set `PORT`. Docker is the
+default deployment — a container's environment is hermetic, so the bare names are
+safe there.
+
+## Tiers
+
+Tiers are defined in `[tiers.*]`; each becomes the virtual id
+`<namespace>/<key>`. Defaults:
+
+| Tier | Routing | Vision |
+|---|---|---|
+| `loxo/auto` | local-first; escalate on size / `x-quality: best` | shim |
+| `loxo/fast` | pinned cloud | reject images (422) |
+| `loxo/balanced` | pinned cloud | shim |
+| `loxo/reason` | pinned cloud | native |
+| `loxo/deep` | pinned cloud | native |
+| `loxo/local` | pinned local, hard-fail (no cloud fallback) | local OCR only |
+
+Rebrand the whole namespace by setting `namespace` in `loxo.toml` (or
+`ROUTER_NS`). Add/retarget tiers by editing the `[tiers.*]` table.
 
 ## Routing rules (first match wins)
-1. `model` matches a `LOCAL_MODELS` entry → LOCAL
-2. `x-quality: best` header → CLOUD
-3. estimated prompt > `LOCAL_CONTEXT_LIMIT` tokens → CLOUD
-4. `model` contains `/` (provider-prefixed) → CLOUD
-5. default → LOCAL
 
-Plus a hard-error fallback: if LOCAL is chosen but unreachable, forward to
-CLOUD with `CLOUD_DEFAULT_MODEL`.
+1. `model` matches a tier id → resolve by that tier's policy
+2. `model` matches a `local_models` entry → local
+3. `x-quality: best` header → cloud
+4. estimated prompt > `local_context_limit` → cloud
+5. `model` contains `/` (provider-prefixed) → cloud
+6. default → local
 
-## Config (env, set in the serve script or `~/.config/llm-router/env`)
-`LOCAL_BASE_URL` · `CLOUD_BASE_URL` · `OPENROUTER_API_KEY` · `LOCAL_MODELS` ·
-`LOCAL_CONTEXT_LIMIT` · `CLOUD_DEFAULT_MODEL`
+Plus a fallback: if local is chosen but unreachable (or disconnects
+mid-stream), forward to cloud with `cloud_default_model` — except for the
+hard-fail `loxo/local` tier.
 
-## Secrets
-`OPENROUTER_API_KEY` lives **outside** this repo at `~/.config/llm-router/env`
-(chmod 600), loaded by the serve script. Never commit it — `.gitignore` guards against it.
+## Deploying
+
+See [docs/deploy.md](docs/deploy.md) for Docker, systemd (Linux), and launchd
+(macOS) recipes.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
