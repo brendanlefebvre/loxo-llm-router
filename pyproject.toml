@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loxo-llm-router"
+version = "0.1.0"
+description = "OpenAI-compatible router that dispatches each request to a local or cloud LLM backend by intent — not retry-on-failure."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Brendan LeFebvre" }]
+keywords = ["llm", "openai", "proxy", "router", "openrouter", "mlx", "ollama", "local-llm"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+  "httpx>=0.27",
+]
+
+[project.urls]
+Homepage = "https://github.com/BrendanL79/loxo-llm-router"
+Repository = "https://github.com/BrendanL79/loxo-llm-router"
+
+[project.scripts]
+loxo-llm-router = "loxo_llm_router:main"
+
+[tool.setuptools]
+packages = ["loxo_llm_router"]
+
+[tool.setuptools.package-data]
+loxo_llm_router = ["loxo.default.toml"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
