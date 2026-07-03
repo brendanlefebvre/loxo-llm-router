@@ -1,28 +1,25 @@
-#!/bin/bash
-set -eu
-PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin
+#!/usr/bin/env bash
+set -euo pipefail
 
-PYTHON=/Users/brendanl/.venvs/mlx/bin/python3
-ROUTER_DIR=/Users/brendanl/bin
-PORT=9090
-# uvicorn log config with UTC-timestamped formatters (lives in the repo).
-LOGCONFIG=/Users/brendanl/src/llm-router/llm-router-logconfig.json
+# Repo dir derived from this script's own location — no hardcoded paths.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Load credentials (OPENROUTER_API_KEY) from a 600-perm env file, not from the plist.
-ENV_FILE=/Users/brendanl/.config/llm-router/env
-[ -f "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
+# Optional env file (secrets/overrides; chmod 600). Override path with LOXO_ENV_FILE.
+ENV_FILE="${LOXO_ENV_FILE:-$HOME/.config/loxo-llm-router/env}"
+if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 
-# Configuration
-export TZ=UTC  # so uvicorn's %(asctime)s renders UTC, matching the router's own log timestamps
-export LOCAL_BASE_URL="${LOCAL_BASE_URL:-http://localhost:7979/v1}"
-export CLOUD_BASE_URL="${CLOUD_BASE_URL:-https://openrouter.ai/api/v1}"
-export LOCAL_MODELS="${LOCAL_MODELS:-mlx-community/Qwen3.6-35B-A3B-4bit}"
-export LOCAL_CONTEXT_LIMIT="${LOCAL_CONTEXT_LIMIT:-60000}"
-export CLOUD_DEFAULT_MODEL="${CLOUD_DEFAULT_MODEL:-anthropic/claude-sonnet-4.6}"
+export TZ="${TZ:-UTC}"
+PYTHON="${PYTHON:-python3}"
 
+# UTC-timestamped uvicorn formatters ship in the repo; use if present.
+LOG_CONFIG="${LOG_CONFIG:-$SCRIPT_DIR/llm-router-logconfig.json}"
+LOG_ARGS=()
+[ -f "$LOG_CONFIG" ] && LOG_ARGS=(--log-config "$LOG_CONFIG")
+
+# Host/port resolve from config; allow shell overrides too.
 exec "$PYTHON" -m uvicorn \
-  --app-dir "$ROUTER_DIR" \
-  --log-config "$LOGCONFIG" \
-  --host 0.0.0.0 \
-  --port "$PORT" \
-  llm_router:app
+  --app-dir "$SCRIPT_DIR" \
+  "${LOG_ARGS[@]}" \
+  --host "${LOXO_HOST:-${HOST:-0.0.0.0}}" \
+  --port "${LOXO_PORT:-${PORT:-9090}}" \
+  loxo_llm_router:app

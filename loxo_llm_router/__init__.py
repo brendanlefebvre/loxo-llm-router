@@ -1036,3 +1036,20 @@ async def health():
         "rate_cards": cards,
         "spend": spend_summary,
     }
+
+
+def main() -> None:
+    """Console entry point (loxo-llm-router): serve the app under uvicorn.
+
+    Host/port come from the resolved config (defaults < loxo.toml < env).
+    LOG_CONFIG (optional path) selects a uvicorn log-config JSON; otherwise
+    logging goes to stdout/stderr.
+    """
+    import uvicorn
+
+    log_config = os.environ.get("LOG_CONFIG") or None
+    uvicorn.run("loxo_llm_router:app", host=HOST, port=PORT, log_config=log_config)
+
+
+if __name__ == "__main__":
+    main()
