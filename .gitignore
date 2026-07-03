@@ -14,3 +14,18 @@ venv/
 
 # OS
 .DS_Store
+
+# Packaging / build
+*.egg-info/
+build/
+dist/
+
+# Tooling / editor / agent state (not for public snapshot)
+.claude/
+.superpowers/
+.pytest_cache/
+vendor/
+
+# Local config / container env
+loxo.toml
+loxo.env
