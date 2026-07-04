@@ -68,7 +68,7 @@ Configuration (env vars):
   VISION_OCR_MIN_CHARS   auto-mode threshold; OCR shorter than this escalates.
   SPEND_LEDGER           path to an append-only JSONL file that persists cloud
                          spend across restarts (default
-                         ~/.config/llm-router/spend.jsonl). Set to "" to
+                         ~/.config/loxo-llm-router/spend.jsonl). Set to "" to
                          disable durability (in-memory only). The file is
                          read once on startup to seed the accumulator.
 
@@ -127,7 +127,7 @@ def resolve_virtual(model_id: str) -> VirtualModel | None:
     """Return the VirtualModel for a client-facing id, or None for raw ids."""
     return VIRTUAL_MODELS.get(model_id)
 
-_DEFAULT_LEDGER = pathlib.Path.home() / ".config" / "llm-router" / "spend.jsonl"
+_DEFAULT_LEDGER = pathlib.Path.home() / ".config" / "loxo-llm-router" / "spend.jsonl"
 _ledger_env = os.environ.get("SPEND_LEDGER", str(_DEFAULT_LEDGER))
 SPEND_LEDGER = pathlib.Path(_ledger_env) if _ledger_env else None
 

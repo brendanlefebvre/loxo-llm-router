@@ -51,12 +51,21 @@ def _user_config_path() -> Path | None:
 
 
 def _merge(base: dict, overlay: dict) -> dict:
-    """Two-level merge: top-level scalars replace; section dicts merge per-key."""
+    """Three-level merge: top scalars replace; section dicts merge per-key;
+    tiers merge per-field so a partial [tiers.X] only overrides the fields named."""
     for k, v in overlay.items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):
-            merged = dict(base[k])
-            merged.update(v)
-            base[k] = merged
+            if k == "tiers":
+                # Per-tier field merge: only named fields are overridden
+                for tier_key, tier_v in v.items():
+                    if isinstance(tier_v, dict) and isinstance(base[k].get(tier_key), dict):
+                        base[k][tier_key] = {**base[k][tier_key], **tier_v}
+                    else:
+                        base[k][tier_key] = tier_v
+            else:
+                merged = dict(base[k])
+                merged.update(v)
+                base[k] = merged
         else:
             base[k] = v
     return base

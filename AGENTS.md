@@ -88,7 +88,7 @@ The router tracks the actual USD cost of every cloud request by reading
 - `GET /health` — includes a compact `spend` summary.
 - Per-request log line: `[router] cloud cost=$X.XXXXXX provider=... model=... total=$Y.YYYYYY`
 - `SPEND_LEDGER` (env var) — path to append-only JSONL ledger; default
-  `~/.config/llm-router/spend.jsonl`. Seeded into memory on startup so totals
+  `~/.config/loxo-llm-router/spend.jsonl`. Seeded into memory on startup so totals
   survive process restarts. Set to `""` to disable (in-memory only).
 
 Note: OpenCode's own `$0.00` display is unchanged — it has no mechanism to read

@@ -76,6 +76,21 @@ def test_secrets_come_only_from_env(tmp_path, monkeypatch):
     assert cfg.openrouter_api_key == "sk-from-env"
 
 
+def test_partial_tier_override_preserves_other_fields(tmp_path, monkeypatch):
+    # A user specifying only cloud_target should keep bundled vision and advertised_context.
+    cfg_path = _write(tmp_path, """
+        [tiers.deep]
+        routing = "cloud"
+        cloud_target = "my-org/better-model"
+    """)
+    monkeypatch.setenv("LOXO_CONFIG", str(cfg_path))
+    cfg = C.load_config()
+    deep = cfg.tiers["loxo/deep"]
+    assert deep.cloud_target == "my-org/better-model"   # override applied
+    assert deep.vision == "native"                       # bundled value preserved
+    assert deep.advertised_context == 1048576            # bundled value preserved
+
+
 def test_local_models_env_is_csv(tmp_path, monkeypatch):
     monkeypatch.setenv("LOXO_CONFIG", str(_write(tmp_path, "namespace='loxo'\n")))
     monkeypatch.setenv("LOCAL_MODELS", "a-model, b-model ,")
