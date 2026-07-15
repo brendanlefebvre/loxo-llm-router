@@ -2,7 +2,11 @@
 set -euo pipefail
 
 # Repo dir derived from this script's own location — no hardcoded paths.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# readlink -f is required: BASH_SOURCE holds the path as invoked, so when this is
+# run through a symlink (e.g. ~/bin/llm-router-serve.sh) an unresolved dirname
+# yields the symlink's directory, not the repo, and --app-dir below then points
+# somewhere with no loxo_llm_router package.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 # Optional env file (secrets/overrides; chmod 600). Override path with LOXO_ENV_FILE.
 ENV_FILE="${LOXO_ENV_FILE:-$HOME/.config/loxo-llm-router/env}"
