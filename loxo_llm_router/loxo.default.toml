@@ -1,0 +1,47 @@
+namespace = "loxo"
+
+[server]
+host = "0.0.0.0"
+port = 9090
+
+[backends]
+local_base_url = "http://localhost:7979/v1"
+cloud_base_url = "https://openrouter.ai/api/v1"
+local_models = []                                  # set per-deployment via TOML or LOCAL_MODELS env
+local_context_limit = 60000
+cloud_default_model = "anthropic/claude-sonnet-4.6"
+
+[tiers.auto]
+routing = "auto"
+cloud_target = "z-ai/glm-5.2"
+vision = "shim"
+advertised_context = 1048576
+
+[tiers.fast]
+routing = "cloud"
+cloud_target = "z-ai/glm-4.7-flash"
+vision = "reject"
+advertised_context = 202752
+
+[tiers.balanced]
+routing = "cloud"
+cloud_target = "z-ai/glm-5.2"
+vision = "shim"
+advertised_context = 1048576
+
+[tiers.reason]
+routing = "cloud"
+cloud_target = "moonshotai/kimi-k2.6"
+vision = "native"
+advertised_context = 262144
+
+[tiers.deep]
+routing = "cloud"
+cloud_target = "google/gemini-2.5-pro"
+vision = "native"
+advertised_context = 1048576
+
+[tiers.local]
+routing = "local"
+vision = "local"
+# advertised_context omitted on purpose — the loader defaults it to local_context_limit

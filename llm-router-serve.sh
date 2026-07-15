@@ -1,28 +1,47 @@
-#!/bin/bash
-set -eu
-PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin
+#!/usr/bin/env bash
+set -euo pipefail
 
-PYTHON=/Users/brendanl/.venvs/mlx/bin/python3
-ROUTER_DIR=/Users/brendanl/bin
-PORT=9090
-# uvicorn log config with UTC-timestamped formatters (lives in the repo).
-LOGCONFIG=/Users/brendanl/src/llm-router/llm-router-logconfig.json
+# Repo dir derived from this script's own location — no hardcoded paths.
+# readlink -f is required: BASH_SOURCE holds the path as invoked, so when this is
+# run through a symlink (e.g. ~/bin/llm-router-serve.sh) an unresolved dirname
+# yields the symlink's directory, not the repo, and --app-dir below then points
+# somewhere with no loxo_llm_router package.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-# Load credentials (OPENROUTER_API_KEY) from a 600-perm env file, not from the plist.
-ENV_FILE=/Users/brendanl/.config/llm-router/env
-[ -f "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
+# Optional env file (secrets/overrides; chmod 600). Override path with LOXO_ENV_FILE.
+ENV_FILE="${LOXO_ENV_FILE:-$HOME/.config/loxo-llm-router/env}"
+if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 
-# Configuration
-export TZ=UTC  # so uvicorn's %(asctime)s renders UTC, matching the router's own log timestamps
-export LOCAL_BASE_URL="${LOCAL_BASE_URL:-http://localhost:7979/v1}"
-export CLOUD_BASE_URL="${CLOUD_BASE_URL:-https://openrouter.ai/api/v1}"
-export LOCAL_MODELS="${LOCAL_MODELS:-mlx-community/Qwen3.6-35B-A3B-4bit}"
-export LOCAL_CONTEXT_LIMIT="${LOCAL_CONTEXT_LIMIT:-60000}"
-export CLOUD_DEFAULT_MODEL="${CLOUD_DEFAULT_MODEL:-anthropic/claude-sonnet-4.6}"
+export TZ="${TZ:-UTC}"
+PYTHON="${PYTHON:-python3}"
 
+# Bare `python3` resolves against PATH, and a service manager's PATH is not your
+# shell's. Under launchd on macOS, /usr/bin/python3 is a stub that dispatches to
+# the active Xcode toolchain, which has no site-packages -- so this dies with a
+# bare "No module named uvicorn" and gets respawned on a KeepAlive loop forever.
+# Check up front and say what to do about it. Set PYTHON in the env file to pin
+# a specific interpreter.
+if ! "$PYTHON" -c 'import uvicorn' >/dev/null 2>&1; then
+  echo "FATAL: interpreter '$PYTHON' cannot import uvicorn." >&2
+  echo "       resolved to: $(command -v "$PYTHON" 2>/dev/null || echo "$PYTHON")" >&2
+  echo "       Set PYTHON=/abs/path/to/python3 in $ENV_FILE (or the environment)" >&2
+  echo "       to an interpreter that has this project's dependencies installed." >&2
+  exit 78  # EX_CONFIG
+fi
+
+# UTC-timestamped uvicorn formatters ship in the repo; use if present.
+LOG_CONFIG="${LOG_CONFIG:-$SCRIPT_DIR/llm-router-logconfig.json}"
+LOG_ARGS=()
+[ -f "$LOG_CONFIG" ] && LOG_ARGS=(--log-config "$LOG_CONFIG")
+
+# Host/port resolve from config; allow shell overrides too.
+# LOG_ARGS expands through the ${x[@]+"${x[@]}"} guard because bash 3.2 -- still
+# /bin/bash on macOS, and what `env bash` finds under launchd -- treats an empty
+# array as unset, so a plain "${LOG_ARGS[@]}" trips `set -u` and exits 1 whenever
+# LOG_CONFIG is absent. Bash 4.4+ doesn't need this; 3.2 does.
 exec "$PYTHON" -m uvicorn \
-  --app-dir "$ROUTER_DIR" \
-  --log-config "$LOGCONFIG" \
-  --host 0.0.0.0 \
-  --port "$PORT" \
-  llm_router:app
+  --app-dir "$SCRIPT_DIR" \
+  ${LOG_ARGS[@]+"${LOG_ARGS[@]}"} \
+  --host "${LOXO_HOST:-${HOST:-0.0.0.0}}" \
+  --port "${LOXO_PORT:-${PORT:-9090}}" \
+  loxo_llm_router:app

@@ -1,0 +1,13 @@
+services:
+  loxo-llm-router:
+    build: .
+    image: loxo-llm-router:latest
+    ports:
+      - "9090:9090"
+    env_file:
+      - ./loxo.env            # copy .env.example -> loxo.env and fill in secrets
+    volumes:
+      - ./loxo.toml:/app/loxo.toml:ro   # optional: mount your tier catalog
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach a model server on the host (Linux)
+    restart: unless-stopped

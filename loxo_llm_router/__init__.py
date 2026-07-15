@@ -27,38 +27,23 @@ or wedged."  It works for streaming requests too, but only before the first
 byte is sent (a partial stream can't be transparently restarted).
 
 Configuration (env vars):
-  LOCAL_BASE_URL         e.g. http://mac-mini.tailnet-name.ts.net:7979/v1
+  LOCAL_BASE_URL         e.g. http://localhost:7979/v1
   CLOUD_BASE_URL         default https://openrouter.ai/api/v1
   OPENROUTER_API_KEY     required for cloud traffic
   LOCAL_MODELS           comma-separated, e.g. "qwen3.6-35b-a3b,qwen3-30b-a3b"
   LOCAL_CONTEXT_LIMIT    default 60000 (tokens; ~240k chars)
   CLOUD_DEFAULT_MODEL    default anthropic/claude-sonnet-4.6
-  AUTO_MODEL_ID          virtual model id clients send (default "airwolf/auto").
-                         Resolved by the router to real upstream models below.
-  AUTO_CLOUD_MODEL       cloud target the virtual model routes to (default
-                         "z-ai/glm-5.2").
-  AUTO_LOCAL_MODEL       local target for the virtual model; unset = first
-                         LOCAL_MODELS entry.
-  FAST_MODEL_ID          virtual id for the pinned-cloud "fast" tier
-                         (default "airwolf/fast").
-  FAST_CLOUD_MODEL       cloud model the fast tier pins to
-                         (default "z-ai/glm-4.7-flash").
-  DEEP_MODEL_ID          virtual id for the pinned-cloud "deep" tier
-                         (default "airwolf/deep").
-  DEEP_CLOUD_MODEL       cloud model the deep tier pins to
-                         (default "google/gemini-2.5-pro").
-  BALANCED_MODEL_ID      virtual id for the pinned-cloud "balanced" tier
-                         (default "airwolf/balanced").
-  BALANCED_CLOUD_MODEL   cloud model the balanced tier pins to
-                         (default "z-ai/glm-5.2").
-  REASON_MODEL_ID        virtual id for the pinned-cloud "reason" tier
-                         (default "airwolf/reason").
-  REASON_CLOUD_MODEL     cloud model the reason tier pins to
-                         (default "moonshotai/kimi-k2.6").
-  LOCAL_TIER_MODEL_ID    virtual id for the pinned-local tier
-                         (default "airwolf/local").
-  LOCAL_TIER_MODEL       local model the local tier pins to; unset = first
-                         LOCAL_MODELS entry.
+
+  Configuration: see loxo.default.toml for the full schema. Precedence is
+  bundled defaults < ./loxo.toml (or $LOXO_CONFIG / ~/.config/loxo-llm-router/
+  loxo.toml) < environment. Tiers are defined under [tiers.*]; the tier id is
+  "<namespace>/<table-key>". Secrets (OPENROUTER_API_KEY, ROUTER_TOKEN) are
+  read ONLY from the environment.
+
+  Env overrides: ROUTER_NS, HOST, PORT, LOCAL_BASE_URL, CLOUD_BASE_URL,
+  LOCAL_MODELS, LOCAL_CONTEXT_LIMIT, CLOUD_DEFAULT_MODEL, LOG_CONFIG,
+  ROUTER_QUIET, LOXO_CONFIG.
+
   RATE_CARD_TTL          seconds before the live rate card is refreshed
                          (default 86400). Fetch is non-blocking and best-effort.
   RATE_CARD_URL          pricing source (default OpenRouter /api/v1/models).
@@ -83,7 +68,7 @@ Configuration (env vars):
   VISION_OCR_MIN_CHARS   auto-mode threshold; OCR shorter than this escalates.
   SPEND_LEDGER           path to an append-only JSONL file that persists cloud
                          spend across restarts (default
-                         ~/.config/llm-router/spend.jsonl). Set to "" to
+                         ~/.config/loxo-llm-router/spend.jsonl). Set to "" to
                          disable durability (in-memory only). The file is
                          read once on startup to seed the accumulator.
 
@@ -101,7 +86,6 @@ import hmac
 import json
 import os
 import pathlib
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -109,104 +93,41 @@ import httpx
 from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from .config import Config, VirtualModel, load_config
+
 
 def _ts() -> str:
     """UTC ISO-8601 timestamp (second resolution, trailing Z) for log lines."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-LOCAL_BASE_URL = os.environ.get("LOCAL_BASE_URL", "http://localhost:7979/v1").rstrip("/")
-CLOUD_BASE_URL = os.environ.get("CLOUD_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-LOCAL_MODELS_ORDER = [
-    m.strip() for m in os.environ.get("LOCAL_MODELS", "").split(",") if m.strip()
-]
+_cfg: Config = load_config()
+
+LOCAL_BASE_URL = _cfg.local_base_url
+CLOUD_BASE_URL = _cfg.cloud_base_url
+OPENROUTER_API_KEY = _cfg.openrouter_api_key
+LOCAL_MODELS_ORDER = list(_cfg.local_models)
 LOCAL_MODELS = set(LOCAL_MODELS_ORDER)
-LOCAL_CONTEXT_LIMIT = int(os.environ.get("LOCAL_CONTEXT_LIMIT", "60000"))
+LOCAL_CONTEXT_LIMIT = _cfg.local_context_limit
+CLOUD_DEFAULT_MODEL = _cfg.cloud_default_model
+QUIET = _cfg.quiet
+ROUTER_TOKEN = _cfg.router_token
+VIRTUAL_MODELS = _cfg.tiers
+ROUTER_NS = _cfg.namespace
+HOST = _cfg.host
+PORT = _cfg.port
 
-
-@dataclass(frozen=True)
-class VirtualModel:
-    """A client-facing model id the router resolves to real upstream models.
-
-    The abstraction lives here, in code: one entry bundles the cloud/local
-    targets, the vision intent, and the advertised context window. Deployment
-    ids are env-overridable; the structure and intent are legible in one place.
-    """
-    id: str
-    cloud_target: str | None = None
-    local_target: str | None = None
-    routing: str = "auto"            # "auto" | "cloud" | "local"
-    vision: str = "shim"             # "native" | "shim" | "local" | "reject"
-    advertised_context: int = 1_048_576
-
-
-def _build_virtual_models() -> dict[str, "VirtualModel"]:
-    return {vm.id: vm for vm in (
-        VirtualModel(
-            id=os.environ.get("AUTO_MODEL_ID", "airwolf/auto"),
-            cloud_target=os.environ.get("AUTO_CLOUD_MODEL", "z-ai/glm-5.2"),
-            local_target=os.environ.get("AUTO_LOCAL_MODEL") or None,
-            routing="auto",
-            vision="shim",
-        ),
-        VirtualModel(
-            id=os.environ.get("FAST_MODEL_ID", "airwolf/fast"),
-            cloud_target=os.environ.get("FAST_CLOUD_MODEL", "z-ai/glm-4.7-flash"),
-            routing="cloud",
-            vision="reject",
-            advertised_context=202_752,
-        ),
-        VirtualModel(
-            id=os.environ.get("DEEP_MODEL_ID", "airwolf/deep"),
-            cloud_target=os.environ.get("DEEP_CLOUD_MODEL", "google/gemini-2.5-pro"),
-            routing="cloud",
-            vision="native",
-            advertised_context=1_048_576,
-        ),
-        VirtualModel(
-            id=os.environ.get("BALANCED_MODEL_ID", "airwolf/balanced"),
-            cloud_target=os.environ.get("BALANCED_CLOUD_MODEL", "z-ai/glm-5.2"),
-            routing="cloud",
-            vision="shim",
-            advertised_context=1_048_576,
-        ),
-        VirtualModel(
-            id=os.environ.get("REASON_MODEL_ID", "airwolf/reason"),
-            cloud_target=os.environ.get("REASON_CLOUD_MODEL", "moonshotai/kimi-k2.6"),
-            routing="cloud",
-            vision="native",
-            advertised_context=262_144,
-        ),
-        VirtualModel(
-            id=os.environ.get("LOCAL_TIER_MODEL_ID", "airwolf/local"),
-            cloud_target=None,
-            local_target=os.environ.get("LOCAL_TIER_MODEL") or None,
-            routing="local",
-            vision="local",
-            advertised_context=LOCAL_CONTEXT_LIMIT,
-        ),
-    )}
-
-
-VIRTUAL_MODELS: dict[str, VirtualModel] = _build_virtual_models()
+AUTO_ID = f"{ROUTER_NS}/auto"
+DEEP_ID = f"{ROUTER_NS}/deep"
+LOCAL_TIER_ID = f"{ROUTER_NS}/local"
+LOCAL_CONNECT_TIMEOUT = float(os.environ.get("LOCAL_CONNECT_TIMEOUT", "5"))
 
 
 def resolve_virtual(model_id: str) -> VirtualModel | None:
     """Return the VirtualModel for a client-facing id, or None for raw ids."""
     return VIRTUAL_MODELS.get(model_id)
 
-
-CLOUD_DEFAULT_MODEL = os.environ.get("CLOUD_DEFAULT_MODEL", "anthropic/claude-sonnet-4.6")
-LOCAL_CONNECT_TIMEOUT = float(os.environ.get("LOCAL_CONNECT_TIMEOUT", "5"))
-QUIET = os.environ.get("ROUTER_QUIET", "") == "1"
-# Optional shared-secret gate. If set, clients must send `Authorization: Bearer <token>`
-# (e.g. set OpenCode's apiKey to this value). Empty = no auth (current behavior).
-# The router proxies to PAID cloud with your key, so on a multi-client LAN this
-# stops anyone who can reach the port from spending your OpenRouter credits.
-ROUTER_TOKEN = os.environ.get("ROUTER_TOKEN", "")
-
-_DEFAULT_LEDGER = pathlib.Path.home() / ".config" / "llm-router" / "spend.jsonl"
+_DEFAULT_LEDGER = pathlib.Path.home() / ".config" / "loxo-llm-router" / "spend.jsonl"
 _ledger_env = os.environ.get("SPEND_LEDGER", str(_DEFAULT_LEDGER))
 SPEND_LEDGER = pathlib.Path(_ledger_env) if _ledger_env else None
 
@@ -634,7 +555,7 @@ async def apply_vision_policy(
     if vision_policy == "reject":
         if has_images:
             raise VisionRejected(
-                "this model tier has no vision; switch to airwolf/auto or airwolf/deep"
+                f"this model tier has no vision; switch to {AUTO_ID} or {DEEP_ID}"
             )
         return base_url, model_to_send, body, reason
 
@@ -643,13 +564,13 @@ async def apply_vision_policy(
             return base_url, model_to_send, body, reason
         if not VISION_SHIM_MODEL:
             raise VisionRejected(
-                "airwolf/local has no local OCR configured (VISION_SHIM_MODEL unset); "
-                "switch to airwolf/deep for vision"
+                f"{LOCAL_TIER_ID} has no local OCR configured (VISION_SHIM_MODEL unset); "
+                f"switch to {DEEP_ID} for vision"
             )
         shimmed, n_chars = await apply_vision_shim(body)
         if n_chars < VISION_OCR_MIN_CHARS:
             raise VisionRejected(
-                "image isn't text-readable locally; switch to airwolf/deep for native vision"
+                f"image isn't text-readable locally; switch to {DEEP_ID} for native vision"
             )
         log(f"[router] vision=local-pin: OCR'd image(s) -> {n_chars} chars for {model_to_send}")
         return base_url, model_to_send, shimmed, f"{reason}+vision-local-pin"
@@ -760,15 +681,15 @@ async def _local_pin_preflight(
         return JSONResponse(status_code=422, content={"error": {
             "message": (f"prompt is too large for local context "
                         f"(~{n} tokens > {LOCAL_CONTEXT_LIMIT}); "
-                        f"switch to airwolf/auto or airwolf/deep"),
+                        f"switch to {AUTO_ID} or {DEEP_ID}"),
             "type": "invalid_request_error", "code": "local_context_exceeded"}})
     try:
         async with httpx.AsyncClient(timeout=LOCAL_CONNECT_TIMEOUT) as client:
             await client.get(f"{LOCAL_BASE_URL}/models")
     except FALLBACK_ERRORS:
         return JSONResponse(status_code=422, content={"error": {
-            "message": ("local server unreachable; start the MLX server "
-                        "or switch to airwolf/auto"),
+            "message": (f"local server unreachable; start the MLX server "
+                        f"or switch to {AUTO_ID}"),
             "type": "invalid_request_error", "code": "local_unreachable"}})
     return None
 
@@ -1029,7 +950,7 @@ def _virtual_model_entries() -> list[dict[str, Any]]:
         {
             "id": vm.id,
             "object": "model",
-            "owned_by": "airwolf-llm-router",
+            "owned_by": f"{ROUTER_NS}-llm-router",
             "context_length": vm.advertised_context,
         }
         for vm in VIRTUAL_MODELS.values()
@@ -1115,3 +1036,20 @@ async def health():
         "rate_cards": cards,
         "spend": spend_summary,
     }
+
+
+def main() -> None:
+    """Console entry point (loxo-llm-router): serve the app under uvicorn.
+
+    Host/port come from the resolved config (defaults < loxo.toml < env).
+    LOG_CONFIG (optional path) selects a uvicorn log-config JSON; otherwise
+    logging goes to stdout/stderr.
+    """
+    import uvicorn
+
+    log_config = os.environ.get("LOG_CONFIG") or None
+    uvicorn.run("loxo_llm_router:app", host=HOST, port=PORT, log_config=log_config)
+
+
+if __name__ == "__main__":
+    main()

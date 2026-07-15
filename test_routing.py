@@ -1,7 +1,7 @@
 """Pure-function tests for the router's routing logic. No network, no server.
 
 Run from the repo root with the router's venv:
-    /Users/brendanl/.venvs/mlx/bin/python3 -m pytest test_routing.py -q
+    python3 -m pytest test_routing.py -q
 
 These are characterization tests: they lock the CURRENT behavior of
 `pick_target`, `estimate_prompt_tokens`, and `is_local_model` so the additive
@@ -14,7 +14,7 @@ import importlib
 
 import pytest
 
-import llm_router as R
+import loxo_llm_router as R
 
 
 @pytest.fixture(autouse=True)
@@ -27,8 +27,11 @@ def routing_env(monkeypatch):
     monkeypatch.setattr(R, "CLOUD_BASE_URL", "https://cloud.test/v1")
     monkeypatch.setattr(R, "CLOUD_DEFAULT_MODEL", "anthropic/claude-sonnet-4.6")
     monkeypatch.setattr(R, "LOCAL_MODELS_ORDER", ["mlx-community/Qwen3.6-35B-A3B-4bit"])
+    # Import-time global: conftest's env isolation lands too late to affect it,
+    # since collection imports this module before any fixture runs.
+    monkeypatch.setattr(R, "ROUTER_NS", "loxo")
     monkeypatch.setattr(R, "VIRTUAL_MODELS", {
-        "airwolf/auto": R.VirtualModel(id="airwolf/auto", cloud_target="z-ai/glm-5.2"),
+        "loxo/auto": R.VirtualModel(id="loxo/auto", cloud_target="z-ai/glm-5.2"),
     })
     yield
 
@@ -134,9 +137,9 @@ def test_is_local_model_empty_name():
 
 
 def test_resolve_virtual_known():
-    vm = R.resolve_virtual("airwolf/auto")
+    vm = R.resolve_virtual("loxo/auto")
     assert vm is not None
-    assert vm.id == "airwolf/auto"
+    assert vm.id == "loxo/auto"
     assert vm.cloud_target == "z-ai/glm-5.2"
     assert vm.vision == "shim"
 
@@ -147,30 +150,30 @@ def test_resolve_virtual_unknown_returns_none():
 
 
 def test_default_registry_has_four_tiers_with_policies():
-    reg = R._build_virtual_models()
-    assert set(reg) >= {"airwolf/auto", "airwolf/fast", "airwolf/deep", "airwolf/local"}
-    assert reg["airwolf/auto"].routing == "auto"
-    assert reg["airwolf/auto"].vision == "shim"
-    assert reg["airwolf/fast"].routing == "cloud"
-    assert reg["airwolf/fast"].vision == "reject"
-    assert reg["airwolf/fast"].cloud_target == "z-ai/glm-4.7-flash"
-    assert reg["airwolf/deep"].routing == "cloud"
-    assert reg["airwolf/deep"].vision == "native"
-    assert reg["airwolf/deep"].cloud_target == "google/gemini-2.5-pro"
-    assert reg["airwolf/local"].routing == "local"
-    assert reg["airwolf/local"].vision == "local"
-    assert reg["airwolf/local"].cloud_target is None
+    reg = R.load_config().tiers
+    assert set(reg) >= {"loxo/auto", "loxo/fast", "loxo/deep", "loxo/local"}
+    assert reg["loxo/auto"].routing == "auto"
+    assert reg["loxo/auto"].vision == "shim"
+    assert reg["loxo/fast"].routing == "cloud"
+    assert reg["loxo/fast"].vision == "reject"
+    assert reg["loxo/fast"].cloud_target == "z-ai/glm-4.7-flash"
+    assert reg["loxo/deep"].routing == "cloud"
+    assert reg["loxo/deep"].vision == "native"
+    assert reg["loxo/deep"].cloud_target == "google/gemini-2.5-pro"
+    assert reg["loxo/local"].routing == "local"
+    assert reg["loxo/local"].vision == "local"
+    assert reg["loxo/local"].cloud_target is None
 
 
 def test_virtual_small_prompt_routes_local_with_resolved_id():
-    base, model, reason = R.pick_target(_body(model="airwolf/auto", text="hi"), None)
+    base, model, reason = R.pick_target(_body(model="loxo/auto", text="hi"), None)
     assert base == R.LOCAL_BASE_URL
     assert model == "mlx-community/Qwen3.6-35B-A3B-4bit"  # virtual id NOT forwarded
     assert reason == "virtual-local"
 
 
 def test_virtual_quality_best_routes_cloud_target():
-    base, model, reason = R.pick_target(_body(model="airwolf/auto"), "best")
+    base, model, reason = R.pick_target(_body(model="loxo/auto"), "best")
     assert base == R.CLOUD_BASE_URL
     assert model == "z-ai/glm-5.2"
     assert reason == "virtual-quality-best"
@@ -178,15 +181,15 @@ def test_virtual_quality_best_routes_cloud_target():
 
 def test_virtual_large_prompt_routes_cloud_target(monkeypatch):
     monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 10)
-    base, model, reason = R.pick_target(_body(model="airwolf/auto", text="x" * 1000), None)
+    base, model, reason = R.pick_target(_body(model="loxo/auto", text="x" * 1000), None)
     assert base == R.CLOUD_BASE_URL
     assert model == "z-ai/glm-5.2"
     assert reason == "virtual-prompt-too-long"
 
 
 def test_virtual_slash_is_not_treated_as_provider_prefixed():
-    # airwolf/auto contains "/" but must NOT fall to the provider-prefixed rule.
-    _, _, reason = R.pick_target(_body(model="airwolf/auto", text="hi"), None)
+    # loxo/auto contains "/" but must NOT fall to the provider-prefixed rule.
+    _, _, reason = R.pick_target(_body(model="loxo/auto", text="hi"), None)
     assert reason.startswith("virtual")
 
 
@@ -198,7 +201,7 @@ def test_local_target_for_explicit_override():
 def test_local_target_for_empty_models_uses_fallback(monkeypatch):
     monkeypatch.setattr(R, "LOCAL_MODELS_ORDER", [])
     vm = R.VirtualModel(id="x", cloud_target="c")
-    assert R.local_target_for(vm, "airwolf/auto") == "airwolf/auto"
+    assert R.local_target_for(vm, "loxo/auto") == "loxo/auto"
 
 
 import asyncio
@@ -301,32 +304,32 @@ def test_parse_rate_card_unknown_id_returns_none():
 
 def test_virtual_model_entries_shape():
     entries = R._virtual_model_entries()
-    assert any(e["id"] == "airwolf/auto" for e in entries)
+    assert any(e["id"] == "loxo/auto" for e in entries)
     e = entries[0]
     assert e["object"] == "model"
-    assert e["owned_by"] == "airwolf-llm-router"
+    assert e["owned_by"] == "loxo-llm-router"
     assert "context_length" in e
 
 
 def test_pinned_cloud_tier_always_cloud(monkeypatch):
-    monkeypatch.setitem(R.VIRTUAL_MODELS, "airwolf/fast", R.VirtualModel(
-        id="airwolf/fast", cloud_target="z-ai/glm-4.7-flash", routing="cloud", vision="reject"))
-    base, model, reason = R.pick_target(_body(model="airwolf/fast", text="hi"), None)
+    monkeypatch.setitem(R.VIRTUAL_MODELS, "loxo/fast", R.VirtualModel(
+        id="loxo/fast", cloud_target="z-ai/glm-4.7-flash", routing="cloud", vision="reject"))
+    base, model, reason = R.pick_target(_body(model="loxo/fast", text="hi"), None)
     assert base == R.CLOUD_BASE_URL
     assert model == "z-ai/glm-4.7-flash"  # virtual id NOT forwarded
     assert reason == "virtual-pinned-cloud"
     # pinned: size and quality headers do not change the lane
     monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 1)
-    base2, model2, reason2 = R.pick_target(_body(model="airwolf/fast", text="x" * 1000), "best")
+    base2, model2, reason2 = R.pick_target(_body(model="loxo/fast", text="x" * 1000), "best")
     assert (base2, model2, reason2) == (R.CLOUD_BASE_URL, "z-ai/glm-4.7-flash", "virtual-pinned-cloud")
 
 
 def test_pinned_local_tier_always_local(monkeypatch):
-    monkeypatch.setitem(R.VIRTUAL_MODELS, "airwolf/local", R.VirtualModel(
-        id="airwolf/local", cloud_target=None, routing="local", vision="local"))
+    monkeypatch.setitem(R.VIRTUAL_MODELS, "loxo/local", R.VirtualModel(
+        id="loxo/local", cloud_target=None, routing="local", vision="local"))
     # even with x-quality: best and a huge prompt, it stays local
     monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 1)
-    base, model, reason = R.pick_target(_body(model="airwolf/local", text="x" * 1000), "best")
+    base, model, reason = R.pick_target(_body(model="loxo/local", text="x" * 1000), "best")
     assert base == R.LOCAL_BASE_URL
     assert model == "mlx-community/Qwen3.6-35B-A3B-4bit"  # first LOCAL_MODELS entry
     assert reason == "virtual-pinned-local"
@@ -335,7 +338,7 @@ def test_pinned_local_tier_always_local(monkeypatch):
 # --- cloud_fallback_for: suppression policy for pinned-local tier -----------
 
 def test_cloud_fallback_allowed_for_auto_local():
-    vm = R.VirtualModel(id="airwolf/auto", cloud_target="z-ai/glm-5.2", routing="auto")
+    vm = R.VirtualModel(id="loxo/auto", cloud_target="z-ai/glm-5.2", routing="auto")
     assert R.cloud_fallback_for(R.LOCAL_BASE_URL, vm) is True
 
 
@@ -344,7 +347,7 @@ def test_cloud_fallback_allowed_for_nonvirtual_local():
 
 
 def test_cloud_fallback_suppressed_for_local_pin():
-    vm = R.VirtualModel(id="airwolf/local", routing="local", vision="local")
+    vm = R.VirtualModel(id="loxo/local", routing="local", vision="local")
     assert R.cloud_fallback_for(R.LOCAL_BASE_URL, vm) is False
 
 
@@ -365,16 +368,16 @@ def test_distinct_cloud_targets_excludes_none(monkeypatch):
 
 def test_local_preflight_oversize_returns_422(monkeypatch):
     monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 10)
-    vm = R.VirtualModel(id="airwolf/local", routing="local", vision="local")
-    body = _body(model="airwolf/local", text="x" * 1000)  # ~250 tokens > 10
+    vm = R.VirtualModel(id="loxo/local", routing="local", vision="local")
+    body = _body(model="loxo/local", text="x" * 1000)  # ~250 tokens > 10
     resp = asyncio.run(R._local_pin_preflight(body, vm))
     assert resp is not None
     assert resp.status_code == 422
 
 
 def test_local_preflight_passes_for_non_local_vm():
-    vm = R.VirtualModel(id="airwolf/auto", cloud_target="z-ai/glm-5.2", routing="auto")
-    assert asyncio.run(R._local_pin_preflight(_body(model="airwolf/auto"), vm)) is None
+    vm = R.VirtualModel(id="loxo/auto", cloud_target="z-ai/glm-5.2", routing="auto")
+    assert asyncio.run(R._local_pin_preflight(_body(model="loxo/auto"), vm)) is None
 
 
 def test_local_preflight_passes_for_no_vm():
@@ -391,8 +394,8 @@ def test_local_preflight_unreachable_returns_422(monkeypatch):
         async def get(self, *a, **k): raise R.httpx.ConnectError("down")
 
     monkeypatch.setattr(R.httpx, "AsyncClient", _Boom)
-    vm = R.VirtualModel(id="airwolf/local", routing="local", vision="local")
-    resp = asyncio.run(R._local_pin_preflight(_body(model="airwolf/local", text="hi"), vm))
+    vm = R.VirtualModel(id="loxo/local", routing="local", vision="local")
+    resp = asyncio.run(R._local_pin_preflight(_body(model="loxo/local", text="hi"), vm))
     assert resp is not None
     assert resp.status_code == 422
 
@@ -400,8 +403,8 @@ def test_local_preflight_unreachable_returns_422(monkeypatch):
 # --- F3: local tier advertises real context limit ----------------------------
 
 def test_local_tier_advertises_local_context_limit():
-    reg = R._build_virtual_models()
-    assert reg["airwolf/local"].advertised_context == R.LOCAL_CONTEXT_LIMIT
+    reg = R.load_config().tiers
+    assert reg["loxo/local"].advertised_context == R.LOCAL_CONTEXT_LIMIT
 
 
 # --- forward(): streaming surfaces upstream non-200 (no masked HTTP 200) ------
@@ -556,7 +559,10 @@ def test_log_prepends_utc_timestamp(capsys, monkeypatch):
 
 def test_uvicorn_logconfig_valid_and_timestamped():
     import json, pathlib
-    cfg = json.loads(pathlib.Path("llm-router-logconfig.json").read_text())
+    # Anchored to this file, not the cwd: the suite runs from an empty directory
+    # so an ambient ./loxo.toml can't reach load_config().
+    cfg_path = pathlib.Path(__file__).parent / "llm-router-logconfig.json"
+    cfg = json.loads(cfg_path.read_text())
     for name in ("default", "access"):
         fmt = cfg["formatters"][name]
         assert "%(asctime)s" in fmt["fmt"]
@@ -566,9 +572,9 @@ def test_uvicorn_logconfig_valid_and_timestamped():
 # --- new dispatch tiers: balanced + reason (2026-06-25 spec) ------------------
 
 def test_balanced_tier_resolves_with_policies():
-    reg = R._build_virtual_models()
-    assert "airwolf/balanced" in reg
-    vm = reg["airwolf/balanced"]
+    reg = R.load_config().tiers
+    assert "loxo/balanced" in reg
+    vm = reg["loxo/balanced"]
     assert vm.cloud_target == "z-ai/glm-5.2"
     assert vm.routing == "cloud"
     assert vm.vision == "shim"
@@ -576,9 +582,9 @@ def test_balanced_tier_resolves_with_policies():
 
 
 def test_reason_tier_resolves_with_policies():
-    reg = R._build_virtual_models()
-    assert "airwolf/reason" in reg
-    vm = reg["airwolf/reason"]
+    reg = R.load_config().tiers
+    assert "loxo/reason" in reg
+    vm = reg["loxo/reason"]
     assert vm.cloud_target == "moonshotai/kimi-k2.6"
     assert vm.routing == "cloud"
     assert vm.vision == "native"
@@ -586,19 +592,19 @@ def test_reason_tier_resolves_with_policies():
 
 
 def test_balanced_tier_routes_cloud_target(monkeypatch):
-    monkeypatch.setitem(R.VIRTUAL_MODELS, "airwolf/balanced", R.VirtualModel(
-        id="airwolf/balanced", cloud_target="z-ai/glm-5.2", routing="cloud", vision="shim"))
-    base, model, reason = R.pick_target(_body(model="airwolf/balanced", text="hi"), None)
+    monkeypatch.setitem(R.VIRTUAL_MODELS, "loxo/balanced", R.VirtualModel(
+        id="loxo/balanced", cloud_target="z-ai/glm-5.2", routing="cloud", vision="shim"))
+    base, model, reason = R.pick_target(_body(model="loxo/balanced", text="hi"), None)
     assert base == R.CLOUD_BASE_URL
     assert model == "z-ai/glm-5.2"
     assert reason == "virtual-pinned-cloud"
 
 
 def test_reason_tier_routes_cloud_target(monkeypatch):
-    monkeypatch.setitem(R.VIRTUAL_MODELS, "airwolf/reason", R.VirtualModel(
-        id="airwolf/reason", cloud_target="moonshotai/kimi-k2.6",
+    monkeypatch.setitem(R.VIRTUAL_MODELS, "loxo/reason", R.VirtualModel(
+        id="loxo/reason", cloud_target="moonshotai/kimi-k2.6",
         routing="cloud", vision="native"))
-    base, model, reason = R.pick_target(_body(model="airwolf/reason", text="hi"), None)
+    base, model, reason = R.pick_target(_body(model="loxo/reason", text="hi"), None)
     assert base == R.CLOUD_BASE_URL
     assert model == "moonshotai/kimi-k2.6"
     assert reason == "virtual-pinned-cloud"
@@ -606,7 +612,7 @@ def test_reason_tier_routes_cloud_target(monkeypatch):
 
 def test_new_tiers_priced_via_distinct_cloud_targets(monkeypatch):
     # /health prices every distinct cloud target in the registry.
-    monkeypatch.setattr(R, "VIRTUAL_MODELS", R._build_virtual_models())
+    monkeypatch.setattr(R, "VIRTUAL_MODELS", R.load_config().tiers)
     targets = R._distinct_cloud_targets()
     assert "z-ai/glm-5.2" in targets
     assert "moonshotai/kimi-k2.6" in targets
