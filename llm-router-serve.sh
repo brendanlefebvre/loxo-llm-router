@@ -35,9 +35,13 @@ LOG_ARGS=()
 [ -f "$LOG_CONFIG" ] && LOG_ARGS=(--log-config "$LOG_CONFIG")
 
 # Host/port resolve from config; allow shell overrides too.
+# LOG_ARGS expands through the ${x[@]+"${x[@]}"} guard because bash 3.2 -- still
+# /bin/bash on macOS, and what `env bash` finds under launchd -- treats an empty
+# array as unset, so a plain "${LOG_ARGS[@]}" trips `set -u` and exits 1 whenever
+# LOG_CONFIG is absent. Bash 4.4+ doesn't need this; 3.2 does.
 exec "$PYTHON" -m uvicorn \
   --app-dir "$SCRIPT_DIR" \
-  "${LOG_ARGS[@]}" \
+  ${LOG_ARGS[@]+"${LOG_ARGS[@]}"} \
   --host "${LOXO_HOST:-${HOST:-0.0.0.0}}" \
   --port "${LOXO_PORT:-${PORT:-9090}}" \
   loxo_llm_router:app

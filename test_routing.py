@@ -27,6 +27,9 @@ def routing_env(monkeypatch):
     monkeypatch.setattr(R, "CLOUD_BASE_URL", "https://cloud.test/v1")
     monkeypatch.setattr(R, "CLOUD_DEFAULT_MODEL", "anthropic/claude-sonnet-4.6")
     monkeypatch.setattr(R, "LOCAL_MODELS_ORDER", ["mlx-community/Qwen3.6-35B-A3B-4bit"])
+    # Import-time global: conftest's env isolation lands too late to affect it,
+    # since collection imports this module before any fixture runs.
+    monkeypatch.setattr(R, "ROUTER_NS", "loxo")
     monkeypatch.setattr(R, "VIRTUAL_MODELS", {
         "loxo/auto": R.VirtualModel(id="loxo/auto", cloud_target="z-ai/glm-5.2"),
     })
@@ -556,7 +559,10 @@ def test_log_prepends_utc_timestamp(capsys, monkeypatch):
 
 def test_uvicorn_logconfig_valid_and_timestamped():
     import json, pathlib
-    cfg = json.loads(pathlib.Path("llm-router-logconfig.json").read_text())
+    # Anchored to this file, not the cwd: the suite runs from an empty directory
+    # so an ambient ./loxo.toml can't reach load_config().
+    cfg_path = pathlib.Path(__file__).parent / "llm-router-logconfig.json"
+    cfg = json.loads(cfg_path.read_text())
     for name in ("default", "access"):
         fmt = cfg["formatters"][name]
         assert "%(asctime)s" in fmt["fmt"]
