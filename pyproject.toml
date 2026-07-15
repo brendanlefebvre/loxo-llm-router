@@ -24,8 +24,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/BrendanL79/loxo-llm-router"
-Repository = "https://github.com/BrendanL79/loxo-llm-router"
+Homepage = "https://loxorouter.dev/"
+Repository = "https://github.com/brendanlefebvre/loxo-llm-router"
 
 [project.scripts]
 loxo-llm-router = "loxo_llm_router:main"

@@ -20,11 +20,12 @@ venv/
 build/
 dist/
 
-# Tooling / editor / agent state (not for public snapshot)
+# Tooling / editor / agent state — this repo is public, these never ship
 .claude/
 .superpowers/
 .pytest_cache/
 vendor/
+docs/superpowers/
 
 # Local config / container env
 loxo.toml
