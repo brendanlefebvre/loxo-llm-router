@@ -2,8 +2,8 @@
 
 This document describes what is implemented today. It is updated as part of
 any change that alters behavior described here — a PR isn't done until this
-file agrees with the code. Design intent for future work lives elsewhere
-(branch-only design docs) and is deliberately kept out of this file, so
+file agrees with the code. Design intent for future work lives in
+[ROADMAP.md](ROADMAP.md) and is deliberately kept out of this file, so
 nothing below describes machinery you can't actually run.
 
 ## What Loxo is

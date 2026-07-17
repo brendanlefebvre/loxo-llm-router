@@ -12,7 +12,8 @@ clients ──▶ loxo-llm-router (:9090/v1) ──┬──▶ local model serv
 ```
 
 How it works inside — routing rules, config layering, tiers, the failure
-philosophy — is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+philosophy — is documented in [ARCHITECTURE.md](ARCHITECTURE.md). Where it's
+headed is in [ROADMAP.md](ROADMAP.md).
 
 ## Install & run
 
