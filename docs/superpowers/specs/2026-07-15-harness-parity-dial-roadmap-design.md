@@ -153,13 +153,26 @@ the cost comparison honest (win condition 2). Every release advances both.
   populates the adequacy ledger with classified traffic, and shows cache
   hits in `/v1/spend` and correct context windows.
 - **v0.3 — "Visible dial."** A2 reasoning, B4 shadow evaluation on chore
-  classes, B5 `/v1/dial`, first human-flipped chore-class promotion.
+  classes, B5 `/v1/dial`, first human-flipped chore-class promotion, and
+  **harness checkpoint #1** (pulled forward from v0.4: the endpoint decision
+  below has architectural weight, and if the answer is yes, later is more
+  expensive than sooner). The checkpoint decides:
+  - whether Claude Code enters scope via an Anthropic `/v1/messages`
+    endpoint. Evidence to weigh: OpenRouter's per-model app leaderboards
+    show Claude Code as the top harness by token volume even on open-weight
+    models (e.g. Kimi K3), i.e. the demand pattern Loxo would serve is
+    already mainstream. Also verify Anthropic's current terms still permit
+    the redirection pattern before committing.
+  - whether the Pi slot should pass to Oh-My-Pi (the Pi fork now out-running
+    its parent in traffic, with richer request shapes — subagents, larger
+    tool inventories — that stress the classifier), or omp joins as a third
+    fixture source.
+
   Acceptance: measurable local share on at least one class, defended by
   shadow-derived adequacy stats.
-- **v0.4 — "Earned share."** B6 promotion recommendations, Pi acceptance
-  run, scorecard v2, and **harness checkpoint #1**: reassess which harnesses
-  are worth targeting (including whether Claude Code via a `/v1/messages`
-  endpoint has become worth it).
+- **v0.4 — "Earned share."** B6 promotion recommendations, Pi (or successor
+  per checkpoint #1) acceptance run, scorecard v2 — plus, if checkpoint #1
+  green-lit it, the `/v1/messages` translation layer begins here.
 - **Cadence.** Each subsequent minor release repeats the loop: parity gaps
   found by real sessions, dial share expanded by evidence, harness set
   reassessed.

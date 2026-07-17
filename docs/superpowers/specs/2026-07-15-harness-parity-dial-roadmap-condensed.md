@@ -40,9 +40,11 @@ injection, no dial. The distance between these two paragraphs is the roadmap.
   all scored against the native stacks in a living parity scorecard.
 
 **Milestones.** v0.2 "Honest cloud" — observation ships, caching lands.
-v0.3 "Visible dial" — `/v1/dial`, shadow evaluation, first promoted class.
-v0.4 "Earned share" — promotion recommendations, Pi acceptance run,
-harness-set reassessment.
+v0.3 "Visible dial" — `/v1/dial`, shadow evaluation, first promoted class,
+and the first harness checkpoint: reassess the target-harness set and decide
+whether Claude Code enters scope via an Anthropic `/v1/messages` endpoint.
+v0.4 "Earned share" — promotion recommendations, second-harness acceptance
+run, and (if green-lit) the `/v1/messages` translation layer.
 
 **Honesty mechanism.** The scorecard keeps a standing list of gaps that may
 be structurally unclosable (subscription economics, harness-side model
