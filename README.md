@@ -1,21 +1,31 @@
 # loxo-llm-router
 
-An OpenAI-compatible router that dispatches each request to a **local** (MLX,
-Ollama, llama.cpp, vLLM, LM Studio — anything OpenAI-compatible) or **cloud**
-(OpenRouter) backend based on **intent-expressing heuristics**, not
-retry-on-failure. Clients send one virtual model id; the router resolves it to
-the right backend and model.
+Your coding agent fires hundreds of LLM calls a session — the actual work, but
+also titles, summaries, compaction, tool round-trips — and pays cloud rates for
+every one, with no line-item of what went where. **loxo** sits in front as a single
+OpenAI-compatible endpoint and routes each call to a **local** model or the
+**cloud** by intent: you pick a tier (or let `loxo/auto` stay local until the
+prompt gets big or you ask for the best), and every cloud dollar is tracked per
+model.
 
 ```text
 clients ──▶ loxo-llm-router (:9090/v1) ──┬──▶ local model server (:7979/v1)
                                          └──▶ OpenRouter (cloud)
 ```
 
-How it works inside — routing rules, config layering, tiers, the failure
-philosophy — is documented in [ARCHITECTURE.md](ARCHITECTURE.md). Where it's
-headed is in [ROADMAP.md](ROADMAP.md).
+Works with any OpenAI-compatible client — OpenCode, Pi, the OpenAI SDKs. Point
+it at loxo, send one virtual model id (e.g. `loxo/auto`), and loxo resolves it
+to the right backend and model. On the local side, that backend can be anything
+OpenAI-compatible: MLX, Ollama, llama.cpp, vLLM, LM Studio.
 
-## Install & run
+> Today (v0.1.0) loxo routes by **declared intent** — the tier you pick, the
+> prompt size, an `x-quality` header. Teaching it to shift work onto local
+> models by *measured* adequacy — the local/frontier "dial" — is the
+> [ROADMAP](ROADMAP.md).
+
+## Quickstart
+
+Install and run:
 
 ```bash
 pip install .                 # Python >= 3.11
@@ -23,39 +33,36 @@ export OPENROUTER_API_KEY=sk-or-...
 loxo-llm-router               # serves on 0.0.0.0:9090 with bundled defaults
 ```
 
-Docker:
+Or with Docker:
 
 ```bash
 cp .env.example loxo.env      # add your OPENROUTER_API_KEY
 docker compose up --build
 ```
 
-## Configure
+Send it a request — point any OpenAI-compatible client at `http://localhost:9090/v1`
+and use a `loxo/*` model id:
 
-Configuration layers, lowest to highest precedence:
+```bash
+curl http://localhost:9090/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model": "loxo/auto", "messages": [{"role": "user", "content": "hello"}]}'
+```
 
-1. **bundled defaults** — runs out of the box
-2. **`loxo.toml`** — your tier catalog + app settings (copy `loxo.toml.example`)
-3. **environment** — overrides scalars, and is the **only** place for secrets
+Then see what it cost:
 
-Config-file search order: `$LOXO_CONFIG` → `./loxo.toml` →
-`~/.config/loxo-llm-router/loxo.toml`. See `loxo.toml.example` for the full
-schema and `.env.example` for environment options.
+```bash
+curl http://localhost:9090/v1/spend    # real USD, per provider and model
+```
 
-**Secrets** (`OPENROUTER_API_KEY`, `ROUTER_TOKEN`) are read only from the
-environment — never put them in `loxo.toml`.
-
-**Host/port** resolve `LOXO_HOST`/`LOXO_PORT` → bare `HOST`/`PORT` → `[server]`
-in `loxo.toml` → default `0.0.0.0:9090`. The bare `PORT` is honored so platforms
-that inject it (Heroku, Cloud Run, Railway) work with no extra config; set
-`LOXO_PORT` to force a value regardless of any platform-set `PORT`. Docker is the
-default deployment — a container's environment is hermetic, so the bare names are
-safe there.
+To use loxo from an agent, set the tool's base URL to `http://localhost:9090/v1`
+and its model to a `loxo/*` tier.
 
 ## Tiers
 
-Tiers are defined in `[tiers.*]`; each becomes the virtual id
-`<namespace>/<key>`. Defaults:
+A **tier** is a virtual model id (`<namespace>/<key>`, default namespace `loxo`)
+that stands in for a routing policy. Clients only ever send the tier; loxo
+resolves it to a real backend and model. The bundled tiers:
 
 | Tier | Routing | Vision |
 |---|---|---|
@@ -66,28 +73,28 @@ Tiers are defined in `[tiers.*]`; each becomes the virtual id
 | `loxo/deep` | pinned cloud | native |
 | `loxo/local` | pinned local, hard-fail (no cloud fallback) | local OCR only |
 
-Rebrand the whole namespace by setting `namespace` in `loxo.toml` (or
-`ROUTER_NS`). Add/retarget tiers by editing the `[tiers.*]` table.
+Add or retarget tiers by editing the `[tiers.*]` table in `loxo.toml`.
 
-## Routing rules (first match wins)
+## Configure
 
-1. `model` matches a tier id → resolve by that tier's policy
-2. `model` matches a `local_models` entry → local
-3. `x-quality: best` header → cloud
-4. estimated prompt > `local_context_limit` → cloud
-5. `model` contains `/` (provider-prefixed) → cloud
-6. default → local
+Configuration resolves in three layers, lowest to highest precedence:
 
-Plus a fallback: if local is chosen but unreachable (or disconnects before
-sending a response), forward to cloud with `cloud_default_model` — except for
-the hard-fail `loxo/local` tier. This is a transport fallback only: once a
-streamed response has begun, a mid-stream failure is never restarted (see
-[ARCHITECTURE.md](ARCHITECTURE.md)).
+1. **bundled defaults** — loxo runs out of the box with none of the below
+2. **`loxo.toml`** — your tier catalog and app settings (copy `loxo.toml.example`)
+3. **environment** — overrides scalars, and is the **only** place for secrets
 
-## Deploying
+Secrets (`OPENROUTER_API_KEY`, `ROUTER_TOKEN`) are read **only** from the
+environment — never put them in `loxo.toml`. See `loxo.toml.example` and
+`.env.example` for the full schema, and [ARCHITECTURE.md](ARCHITECTURE.md) for
+the config search order, host/port resolution, and routing rules.
 
-See [docs/deploy.md](docs/deploy.md) for Docker, systemd (Linux), and launchd
-(macOS) recipes.
+## Learn more
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — how routing, config layering, tiers,
+  vision, spend tracking, and the failure philosophy actually work.
+- **[ROADMAP.md](ROADMAP.md)** — where loxo is headed: the local/frontier dial.
+- **[docs/deploy.md](docs/deploy.md)** — Docker, systemd (Linux), and launchd
+  (macOS) deployment recipes.
 
 ## License
 
