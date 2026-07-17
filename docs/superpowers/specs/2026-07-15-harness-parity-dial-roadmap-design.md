@@ -145,6 +145,23 @@ the cost comparison honest (win condition 2). Every release advances both.
   human edits the config. (Per Section 1, promotion is never automatic.)
   Concrete values for N and the threshold are set in the v0.3 implementation
   plan, informed by the request volumes the v0.2 ledger actually observes.
+- **B7. Evidence supply — field data vs. lab instrument.** The dial needs
+  traffic, and one operator's sessions may not supply enough volume across
+  all classes. Two supply lines, structurally separated:
+  - *Real traffic* — the operator's own sessions, other recruited operators,
+    and agent-driven maintenance chores on the operator's actual repos
+    (dependency bumps, test gaps, docs): genuine work with genuine request
+    shapes. This is the **only** promotion evidence the dial ever reads.
+  - *The bench suite* — reproducible headless harness runs (e.g.
+    `opencode run`, scripted Pi) over a fixed task suite, writing to a
+    **separate bench ledger** the promotion logic structurally cannot see.
+    Physical separation, not a source tag with weighting rules — a tag
+    scheme is one weighting bug away from silently poisoning the well.
+    The bench is an instrument for *relative* judgments, where its frozen
+    task distribution is a controlled variable rather than a bias:
+    screening candidate local models before spending shadow samples on
+    them, longitudinal comparison across local model updates, and pre/post
+    regression checks around promotions.
 
 ### Milestones
 
@@ -153,7 +170,8 @@ the cost comparison honest (win condition 2). Every release advances both.
   populates the adequacy ledger with classified traffic, and shows cache
   hits in `/v1/spend` and correct context windows.
 - **v0.3 — "Visible dial."** A2 reasoning, B4 shadow evaluation on chore
-  classes, B5 `/v1/dial`, first human-flipped chore-class promotion, and
+  classes, B5 `/v1/dial`, B7 bench suite v1 (separate ledger from day one),
+  first human-flipped chore-class promotion, and
   **harness checkpoint #1** (pulled forward from v0.4: the endpoint decision
   below has architectural weight, and if the answer is yes, later is more
   expensive than sooner). The checkpoint decides:

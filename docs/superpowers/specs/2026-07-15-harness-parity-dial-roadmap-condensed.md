@@ -32,7 +32,10 @@ injection, no dial. The distance between these two paragraphs is the roadmap.
   **shadow-evaluate** local models on sampled copies of cloud-bound traffic,
   off the critical path; promote a class to local only when the evidence
   supports it — and only by human decision, never automatically, because a
-  wrong promotion is an invisible quality regression.
+  wrong promotion is an invisible quality regression. Promotion evidence
+  comes only from real traffic; a reproducible bench suite (headless harness
+  runs over fixed tasks) exists for screening and regression comparisons but
+  writes to a separate ledger the promotion logic cannot see.
 - *Parity (floor):* inject Anthropic `cache_control` breakpoints that
   OpenAI-compatible harnesses can never send themselves (~10x cheaper input
   tokens); reasoning passthrough; honest tier metadata (context defined by
