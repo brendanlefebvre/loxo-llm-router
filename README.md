@@ -11,6 +11,9 @@ clients ──▶ loxo-llm-router (:9090/v1) ──┬──▶ local model serv
                                          └──▶ OpenRouter (cloud)
 ```
 
+How it works inside — routing rules, config layering, tiers, the failure
+philosophy — is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Install & run
 
 ```bash
