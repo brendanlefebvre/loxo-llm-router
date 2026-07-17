@@ -214,6 +214,63 @@ with one clear seam (following the `config.py` precedent): `classify.py`,
 `cache.py`, `ledger.py` (absorbing the existing spend accumulator), `dial.py`.
 The routing core (`pick_target`, `forward`) stays put and stays small.
 
+### State and ledgers
+
+All mutable state lives under one root — `LOXO_STATE_DIR`, defaulting to
+`~/.local/state/loxo-llm-router/` — because ledgers are operational *state*,
+not configuration (XDG draws exactly this line; "back up my config" should
+not drag operational history along, and config can stay read-only). Layout:
+
+```
+$LOXO_STATE_DIR/
+  spend.jsonl          # existing spend ledger (relocated)
+  adequacy.jsonl       # B2 — the dial's only evidence source
+  bench/<run-id>.jsonl # B7 — bench runs, one file per run
+```
+
+Rules:
+
+- **Back-compat:** the explicit `SPEND_LEDGER` override keeps working. If
+  the legacy config-dir file exists and the new path doesn't, read the
+  legacy path and log a pointer — never silently fork history into two
+  half-ledgers each claiming to be the total.
+- **Docker:** one named volume mounted at the state root makes every
+  present and future ledger durable across rebuilds.
+- **JSONL stays the engine** at single-operator scale: append-only files,
+  in-memory aggregates seeded at startup (the existing spend pattern).
+  Revisit trigger for SQLite, written down instead of pre-built: `/v1/dial`
+  seeding or aggregation taking noticeable seconds.
+- **Append-only is a design invariant, not an implementation detail:**
+  ledger files are never rewritten in place (rotation is allowed, mutation
+  is not). This is what keeps sync and backup trivial below.
+- **B7's separation is structural:** promotion code constructs its reader
+  from the adequacy path alone; the bench writer is a separate module
+  writing per-run files under `bench/`. No shared ledger-router abstraction
+  a bug could cross-wire.
+- **State never lives in the working tree** — the repo is public; no
+  gitignore should be the only thing keeping operational data out of the
+  published project.
+
+**Centralized backup and multi-operator pooling — provision now, build
+later.** When other operators join, their real traffic becomes promotion
+evidence (B7), so ledgers must eventually flow to a central store; the same
+mechanism doubles as backup. What gets locked in *now* is the set of
+invariants that make the future collector cheap, not the collector itself:
+
+- Append-only + per-file byte-offset checkpoints mean incremental push is
+  idempotent — no merges, no conflicts, resend-safe.
+- Each router instance *pushes* increments to a token-authenticated central
+  collector (push, not pull: operator machines sit behind NAT). Operator
+  identity is a namespace at the store, never rewritten into entries.
+- The central store is additive aggregation and backup only. Local
+  operation never depends on it: a down collector costs sync lag, not
+  routing.
+- Ledgers remain metadata-only (see risk 7), so pooling adds minimal
+  sensitivity.
+
+Implementation waits for the second operator or the first real backup need,
+whichever comes first; until then, the invariants are the deliverable.
+
 ### Testing strategy
 
 - **Unit tests** (existing pytest style): classifier taxonomy decisions,
@@ -269,12 +326,19 @@ The routing core (`pick_target`, `forward`) stays put and stays small.
    from the response body, not trusted fields.*
 7. **Ledger privacy.** Ledgers record metadata (class, model, counts,
    outcomes), never message content; shadow evaluation sends content only to
-   the local backend, adding zero new cloud exposure.
+   the local backend, adding zero new cloud exposure. The future central
+   collector inherits this posture: it aggregates the same metadata-only
+   files, authenticated by token, and holds nothing an operator's local
+   ledger doesn't already hold.
 
 ### Open questions (deferred, tracked here so they aren't lost)
 
 - Quality-judging for main-turn classes (LLM-judge comparison of shadow
   outputs) — required before the dial can ever move main-turn traffic.
+- Central ledger collector transport (HTTP push to a small collector
+  service vs. object storage) — decided when the second operator or first
+  backup need arrives; the append-only invariants above keep both options
+  open.
 - Idle-aware shadow scheduling.
 - Whether `/v1/messages` (Claude Code as client) enters scope at harness
   checkpoint #1.
