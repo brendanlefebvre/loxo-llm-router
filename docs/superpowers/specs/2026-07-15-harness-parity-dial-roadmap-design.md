@@ -11,10 +11,11 @@ this paragraph is true today, and some of it may never be; the roadmap exists
 to close each gap or to establish, with evidence, why it cannot be closed.
 The aspiration: Loxo becomes the dial that tracks the local/frontier boundary
 as it moves. Concretely: you point OpenCode or Pi at Loxo with an OpenRouter
-key (and optionally a local server URL); the session feels foundation-quality
-from turn one; the cost lands at or below what the operator actually spends
-today; and local models absorb an evidence-earned, growing share of the
-traffic without the session ever feeling it.
+key (and optionally a local server URL); local models absorb an
+evidence-earned, growing share of a real agentic workload; the cost lands at
+or below what the operator actually spends today; and the session stays good
+enough that choosing Loxo over the native stacks never feels like a
+sacrifice.
 
 **Where Loxo actually stands (v0.1.0):** an OpenAI-compatible proxy with
 heuristic tier routing, local→cloud transport fallback, a vision policy, a
@@ -24,17 +25,21 @@ The distance between that paragraph and this one is the roadmap.
 
 **Win conditions** (checkable, in priority order):
 
-1. **Capability**: a real working session in OpenCode and in Pi, on `loxo/*`
-   tiers, doing real work, doesn't feel handicapped versus the native
-   foundation stack — backed by a parity scorecard with per-capability
-   evidence, not vibes alone.
+1. **Local absorption** — the headline metric: the fraction of real-session
+   tokens served locally *with proven adequacy*, growing release over
+   release. Per-request-class local share is measured, visible, and expands
+   only when evidence supports promotion — the capability neither the
+   foundation harnesses (no local incentive) nor OpenRouter (no local
+   access) can ever offer.
 2. **Cost**: `/v1/spend` for a representative month is at or below the
    operator's actual current monthly spend. Parity is a win; meaningfully
    more expensive for a similar experience is *the* loss condition.
-3. **The dial exists**: per-request-class local share is measured, visible,
-   and expands when evidence supports promotion — the capability neither the
-   foundation harnesses (no local incentive) nor OpenRouter (no local access)
-   can ever offer.
+3. **Experience floor** — a constraint with teeth, not a vestige: a real
+   working session in OpenCode and in Pi, on `loxo/*` tiers, must stay above
+   "I'd still choose this for real work today," backed by the parity
+   scorecard with per-capability evidence. The floor protects the evidence
+   stream: a dial with no traffic measures nothing — local absorption of
+   zero sessions is zero.
 
 **Explicit non-goals for this roadmap:**
 
@@ -60,12 +65,14 @@ this roadmap, not a failure state.
 
 ## Section 2: Roadmap architecture — two tracks, three milestones
 
-The roadmap runs two tracks in parallel. The **parity track** is the visible
-work: closing the capability gaps between "OpenCode/Pi through Loxo" and the
-native foundation stacks. The **dial track** is the quiet work: shipping
-classification and measurement in observe-only mode from the first release,
-so that evidence starts accruing immediately — the dial's premise is
-evidence, and evidence has lead time. Every release advances both.
+The roadmap runs two tracks in parallel. The **dial track** is the headline
+work: classification, adequacy measurement, shadow evaluation, and earned
+promotion — the machinery of local absorption, shipping observe-only from the
+first release because the dial's premise is evidence and evidence has lead
+time. The **parity track** is the floor work: closing the cloud-side
+capability gaps that keep the experience worth choosing (win condition 3) and
+the cost comparison honest (win condition 2). Every release advances both.
+(Track letters below are organizational, not a priority order.)
 
 ### Track A — Parity (cloud-side capability)
 
@@ -96,7 +103,9 @@ evidence, and evidence has lead time. Every release advances both.
 - **A4. Parity scorecard.** A living `docs/parity.md` scoring Loxo against
   the native stack per capability (caching, reasoning, tool fidelity,
   vision, metadata, streaming, error surfaces, cost) with evidence links.
-  Includes the standing "structurally unclosable" section.
+  Includes the standing "structurally unclosable" section. The scorecard
+  measures the experience floor, not the project's goal — its job is to
+  prove the floor holds while the dial climbs.
 
 ### Track B — The dial (measurement before movement)
 
@@ -139,10 +148,10 @@ evidence, and evidence has lead time. Every release advances both.
 
 ### Milestones
 
-- **v0.2 — "Honest cloud."** A1 cache injection, A3 metadata, scorecard v1,
-  B1+B2 observing. Acceptance: a real OpenCode session on `loxo/*` shows
-  cache hits in `/v1/spend`, correct context windows, and a populating
-  adequacy ledger.
+- **v0.2 — "Honest cloud."** B1+B2 observing, A1 cache injection, A3
+  metadata, scorecard v1. Acceptance: a real OpenCode session on `loxo/*`
+  populates the adequacy ledger with classified traffic, and shows cache
+  hits in `/v1/spend` and correct context windows.
 - **v0.3 — "Visible dial."** A2 reasoning, B4 shadow evaluation on chore
   classes, B5 `/v1/dial`, first human-flipped chore-class promotion.
   Acceptance: measurable local share on at least one class, defended by
