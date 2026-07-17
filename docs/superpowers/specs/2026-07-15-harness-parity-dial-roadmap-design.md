@@ -77,13 +77,21 @@ the cost comparison honest (win condition 2). Every release advances both.
 ### Track A — Parity (cloud-side capability)
 
 - **A1. Prompt cache injection.** OpenAI-compatible harnesses never send
-  Anthropic `cache_control` breakpoints, so Loxo injects them on cloud-bound
-  requests whose target supports caching: system prompt, tool definitions,
-  and a stable conversation prefix (respecting the 4-breakpoint limit).
-  This is the single largest cost lever for agentic traffic (cached input
-  tokens are ~10x cheaper). Cache hit rates surface in `/v1/spend`.
-  Constraint to verify: cache affinity through OpenRouter may require
-  provider pinning.
+  Anthropic `cache_control`, so Loxo enables caching on cloud-bound requests
+  whose target supports it. OpenRouter's chat-completions dialect (verified
+  2026-07-16 against its prompt-caching docs) offers two mechanisms, tried
+  in order of simplicity:
+  1. *Automatic:* a top-level `cache_control` field enables auto-advancing
+     cache breakpoints on Anthropic/Vertex/Azure targets — potentially a
+     one-field injection.
+  2. *Manual fallback:* per-content-block `cache_control` breakpoints
+     (system prompt, tool definitions, stable conversation prefix), max 4
+     per request, minimum cacheable prefix 1,024–4,096 tokens depending on
+     model, 5-minute default TTL or 1-hour via `ttl`.
+  This is the single largest cost lever for agentic traffic (cache reads
+  cost 0.1x input; writes 1.25–2x). Cache hit rates surface in `/v1/spend`.
+  The v0.2 spike decides between the two mechanisms by measuring real
+  observed hit rates, not docs.
 - **A2. Reasoning support.** Tiers gain a reasoning knob mapped to
   OpenRouter's `reasoning` parameter; reasoning deltas stream through to the
   client. Verified against what OpenCode and Pi actually render.
@@ -237,11 +245,13 @@ The routing core (`pick_target`, `forward`) stays put and stays small.
    scorecard's cost section answers this with a month of real data —
    producing that answer is a win condition, not a failure.*
 2. **Cache affinity through OpenRouter.** Anthropic cache hits require
-   consecutive requests to land on the same provider; OpenRouter's load
-   balancing may break affinity without provider pinning. *Disposition:
-   spike this first in v0.2 — if caching through OpenRouter proves
-   unreliable, the cost leg of the vision needs redesign, and we want to
-   know in week one.*
+   consecutive requests to land on the same provider. Partially pre-solved:
+   OpenRouter documents "provider sticky routing" after cached requests,
+   deliberately routing follow-ups to the same provider to maximize hits.
+   *Disposition: still spike this first in v0.2 — docs describing sticky
+   routing and a real OpenCode session showing cache-read tokens in
+   `/v1/spend` are different things. If observed hit rates disappoint, the
+   cost leg of the vision needs redesign, and we want to know in week one.*
 3. **Classifier fragility.** Heuristic classification breaks when harnesses
    change their request shapes between versions. *Disposition: observe-only
    start, `unknown` as the safe default class, per-version golden fixtures.*

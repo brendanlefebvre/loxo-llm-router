@@ -36,11 +36,12 @@ injection, no dial. The distance between these two paragraphs is the roadmap.
   comes only from real traffic; a reproducible bench suite (headless harness
   runs over fixed tasks) exists for screening and regression comparisons but
   writes to a separate ledger the promotion logic cannot see.
-- *Parity (floor):* inject Anthropic `cache_control` breakpoints that
-  OpenAI-compatible harnesses can never send themselves (~10x cheaper input
-  tokens); reasoning passthrough; honest tier metadata (context defined by
-  routing policy, price as a ceiling plus per-call truth via `usage.cost`);
-  all scored against the native stacks in a living parity scorecard.
+- *Parity (floor):* enable Anthropic prompt caching that OpenAI-compatible
+  harnesses can never request themselves (via OpenRouter's top-level
+  `cache_control` or injected per-block breakpoints; cache reads cost 0.1x);
+  reasoning passthrough; honest tier metadata (context defined by routing
+  policy, price as a ceiling plus per-call truth via `usage.cost`); all
+  scored against the native stacks in a living parity scorecard.
 
 **Milestones.** v0.2 "Honest cloud" — observation ships, caching lands.
 v0.3 "Visible dial" — `/v1/dial`, shadow evaluation, first promoted class,
