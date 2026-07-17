@@ -81,7 +81,7 @@ The router is a single `loxo_llm_router/__init__.py`; this roadmap adds a classi
 
 All mutable state lives under one root — `LOXO_STATE_DIR`, defaulting to `~/.local/state/loxo-llm-router/` — because ledgers are operational *state*, not configuration (XDG draws exactly this line; "back up my config" should not drag operational history along, and config can stay read-only). Layout:
 
-```
+```text
 $LOXO_STATE_DIR/
   spend.jsonl          # existing spend ledger (relocated)
   adequacy.jsonl       # B2 — the dial's only evidence source

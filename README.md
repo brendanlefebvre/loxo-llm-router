@@ -6,7 +6,7 @@ Ollama, llama.cpp, vLLM, LM Studio — anything OpenAI-compatible) or **cloud**
 retry-on-failure. Clients send one virtual model id; the router resolves it to
 the right backend and model.
 
-```
+```text
 clients ──▶ loxo-llm-router (:9090/v1) ──┬──▶ local model server (:7979/v1)
                                          └──▶ OpenRouter (cloud)
 ```
@@ -78,9 +78,11 @@ Rebrand the whole namespace by setting `namespace` in `loxo.toml` (or
 5. `model` contains `/` (provider-prefixed) → cloud
 6. default → local
 
-Plus a fallback: if local is chosen but unreachable (or disconnects
-mid-stream), forward to cloud with `cloud_default_model` — except for the
-hard-fail `loxo/local` tier.
+Plus a fallback: if local is chosen but unreachable (or disconnects before
+sending a response), forward to cloud with `cloud_default_model` — except for
+the hard-fail `loxo/local` tier. This is a transport fallback only: once a
+streamed response has begun, a mid-stream failure is never restarted (see
+[ARCHITECTURE.md](ARCHITECTURE.md)).
 
 ## Deploying
 

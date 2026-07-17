@@ -13,7 +13,7 @@ to a **local** OpenAI-compatible server or to **cloud** (OpenRouter), based
 on *intent-expressing heuristics* — the client's request says what it needs,
 and the router resolves it — not retry-on-failure.
 
-```
+```text
 clients ──▶ loxo-llm-router (:9090/v1) ──┬──▶ local model server (:7979/v1)
                                          └──▶ OpenRouter (cloud)
 ```
