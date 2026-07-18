@@ -12,6 +12,12 @@ docker compose up --build -d
 curl http://localhost:9090/health
 ```
 
+Operational state (the spend ledger, and future ledgers) lives under
+`LOXO_STATE_DIR` (default `~/.local/state/loxo-llm-router/`). The compose file
+mounts a named volume there so ledgers survive rebuilds. A pre-existing ledger
+at the legacy `~/.config/loxo-llm-router/spend.jsonl` keeps working — the
+router logs a pointer; move the file to the state dir when convenient.
+
 If your model server runs on the host, set
 `local_base_url = "http://host.docker.internal:7979/v1"` in `loxo.toml`.
 

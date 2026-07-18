@@ -8,6 +8,10 @@ services:
       - ./loxo.env            # copy .env.example -> loxo.env and fill in secrets
     volumes:
       - ./loxo.toml:/app/loxo.toml:ro   # optional: mount your tier catalog
+      - loxo-state:/home/appuser/.local/state/loxo-llm-router  # ledgers survive rebuilds
     extra_hosts:
       - "host.docker.internal:host-gateway"   # reach a model server on the host (Linux)
     restart: unless-stopped
+
+volumes:
+  loxo-state:
