@@ -114,6 +114,9 @@ class SpendTracker:
                   f"model={model} total=${total:.6f}")
         if not self.ledger_path:
             return
+        # Append outside the lock on purpose: O_APPEND keeps concurrent writes
+        # byte-safe, and blocking file IO must not serialize the accumulator;
+        # file order may diverge from accumulation order.
         entry = json.dumps({
             "ts": datetime.now(timezone.utc).isoformat(),
             "provider": provider,

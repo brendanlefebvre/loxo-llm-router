@@ -12,6 +12,16 @@ time can't be reached from here (fixtures run after collection imports the
 module); test_routing.py's `routing_env` pins those separately.
 """
 
+import os
+import tempfile
+
+# Bind the app's import-time SPEND singleton to a throwaway state dir. This
+# must happen at conftest import (before collection imports the package) —
+# the per-test fixture below runs too late to affect module-level globals.
+# Set unconditionally: a developer's real LOXO_STATE_DIR must not leak in.
+os.environ["LOXO_STATE_DIR"] = tempfile.mkdtemp(prefix="loxo-test-state-")
+os.environ["SPEND_LEDGER"] = ""  # and never write a ledger from the suite
+
 import pytest
 
 # Every environment variable load_config() consults.
@@ -30,7 +40,9 @@ _CONFIG_ENV = (
     "OPENROUTER_API_KEY",
     "ROUTER_TOKEN",
     "ROUTER_QUIET",
-    # State (ledger) resolution — isolate like config, for the same reason.
+    # State (ledger) resolution — isolate like config, for the same reason
+    # (module-level defaults above handle the import-time SPEND singleton;
+    # this keeps per-test env clean).
     "SPEND_LEDGER",
     "LOXO_STATE_DIR",
     "XDG_STATE_HOME",

@@ -143,3 +143,12 @@ def test_tracker_seed_failure_starts_fresh(tmp_path):
     unreadable.mkdir()
     t = _tracker(unreadable)  # read_text on a dir raises internally; must not propagate
     assert asyncio.run(t.snapshot())["total_usd"] == 0.0
+
+
+# --- suite isolation canary ---------------------------------------------------
+
+def test_app_spend_singleton_is_isolated_from_real_state():
+    """conftest's module-level env must have bound the import-time SPEND
+    singleton away from any real ledger before the package was imported."""
+    import loxo_llm_router as R
+    assert R.SPEND.ledger_path is None  # SPEND_LEDGER="" disables persistence

@@ -20,5 +20,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD python3 -c 'import os,urllib.request; urllib.request.urlopen("http://localhost:"+os.environ["PORT"]+"/health", timeout=4)' || exit 1
 
 # The spend ledger lands under this user's home, not /app.
+# Pre-create the state root owned by appuser: a named volume mounted here
+# inherits this ownership at first use. Without it Docker initializes the
+# volume root-owned and every ledger append fails with a silent EACCES.
+RUN mkdir -p /home/appuser/.local/state/loxo-llm-router \
+    && chown -R appuser:appuser /home/appuser/.local
 USER appuser
 CMD ["loxo-llm-router"]
