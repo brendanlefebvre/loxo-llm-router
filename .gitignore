@@ -30,3 +30,6 @@ docs/superpowers/
 # Local config / container env
 loxo.toml
 loxo.env
+
+# Spike output (raw usage evidence; summarized into docs/spikes/)
+spike-results.jsonl
