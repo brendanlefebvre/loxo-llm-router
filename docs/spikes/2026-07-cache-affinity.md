@@ -83,13 +83,27 @@ per-call costs above match them almost exactly (e.g. Sonnet cold turn 0:
 2. **Discount ratio, repeat-final (or true repeat) vs `none` control:**
    Haiku: `auto` $0.003541 vs `none` $0.034941 → **9.87x cheaper (89.9%
    discount)**; `manual` $0.003550 vs `none` → **9.84x (89.8% discount)**.
-   Sonnet (no `none` control run for Sonnet; comparing the genuine cold-cache
-   turn 0 to the corrected true-repeat call): $0.130974 → $0.010804 →
-   **12.1x cheaper (91.75% discount)**. Both ratios track the rate-card's
-   10x cache-read discount closely; the small deviations are explained by
-   completion-token cost being a fixed, non-discounted component of the
-   Sonnet comparison (which used a cache-write call as the baseline, not a
-   true no-cache-control control).
+   Sonnet has no `none` control run. An earlier draft of this finding
+   compared `auto (Sonnet) turn 0 (cold)` ($0.130974) directly to the
+   corrected true-repeat call and reported 12.1x/91.75% — that comparison is
+   **invalid**: turn 0 is a *cache-write* call (`cache_write_tokens: 34668`),
+   billed at Anthropic's 1.25x write premium ($3.75/Mtok), not a true
+   no-cache-control baseline, so it overstates the discount. The correct
+   comparison uses a plain-rate hypothetical baseline — all 34,888 prompt
+   tokens of the true-repeat call priced at Sonnet's un-cached input rate
+   ($3.00/Mtok) plus that call's own completion cost:
+   34888 × $3.00/Mtok + $0.00033 = **$0.104994** baseline, vs the corrected
+   true-repeat call's actual **$0.0108045** (`auto (Sonnet, corrected
+   re-run*) true repeat`, 34885/34888 tokens cached) → **9.72x cheaper (89.7%
+   discount)** — consistent with the Haiku ratios and the rate card's 10x
+   cache-read discount (the residual sub-10x gap is the 3 uncached tokens on
+   that call plus rounding). The 1.25x cache-write premium is what actually
+   explains the ~$0.026 gap between turn 0's observed cost and a plain-rate
+   baseline on turn 0's own tokens (34671 × ($3.75 − $3.00)/1e6 = $0.026001,
+   matching the cache-write token count exactly) — not "completion-token
+   cost being a fixed, non-discounted component" as an earlier draft
+   claimed (completion cost differs by only ~$0.0006 between the two
+   calls).
 
 3. **Sticky routing:** yes, within every mechanism/model run, every call
    (turn 0 through repeat-final) landed on the identical upstream provider —
@@ -112,10 +126,14 @@ per-call costs above match them almost exactly (e.g. Sonnet cold turn 0:
    appended to `messages` immediately after every `"turn"` call (including
    turn 3), so by the time `repeat-final` builds its body, the conversation
    already ends in an assistant message instead of duplicating turn 3's
-   user-ending request. OpenRouter's error metadata shows it retried across
-   4 upstream routes (Anthropic, Google Vertex, Anthropic again, then Google
-   which itself 429'd) before surfacing this 400 from an Azure route — all
-   of them rejected the same malformed shape. Claude Haiku 4.5's providers,
+   user-ending request. In an ad-hoc debug call not captured in
+   `spike-results.jsonl` (a one-off replay used to pull the full error body,
+   not a run of the committed script), OpenRouter's error metadata appeared
+   to show it retried across 4 upstream routes (Anthropic, Google Vertex,
+   Anthropic again, then Google which itself 429'd) before surfacing this
+   400 from an Azure route — all of them apparently rejecting the same
+   malformed shape; treat this routing detail as an unrecorded, unverified
+   observation rather than a confirmed measurement. Claude Haiku 4.5's providers,
    by contrast, silently *accepted* the same malformed (assistant-ending)
    shape as an assistant-prefill continuation and returned 200 with valid
    cache data — so Haiku's `repeat-final` numbers above measure a prefill
@@ -164,7 +182,13 @@ cheap probe model (Haiku) and the router's actual Sonnet default target.
   to with caching enabled may differ from today's default routing, and that
   could have its own latency/availability characteristics.
 - Known script defect (see Finding 4): `scripts/cache_spike.py`'s
-  `repeat-final` call is malformed for all mechanisms today, though it only
-  surfaced as a hard failure on Sonnet. Fix before any future reuse of this
-  script; it doesn't block B1 since B1 will construct real request bodies,
-  not reuse the spike script.
+  `repeat-final` call was malformed for all mechanisms, though it only
+  surfaced as a hard failure on Sonnet. **Fixed post-measurement** —
+  `repeat-final` now builds its body from the pre-append message list so it
+  duplicates the final turn's user-ending request instead of replaying an
+  assistant-terminated conversation. The Results above were gathered before
+  this fix (Haiku's `repeat-final` rows are prefill-continuation
+  measurements, not pure re-reads, as noted in Finding 4); the Sonnet
+  "corrected re-run" rows were produced by an equivalent ad hoc workaround
+  and stand as-is. It doesn't block B1 since B1 will construct real request
+  bodies, not reuse the spike script.

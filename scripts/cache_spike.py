@@ -11,7 +11,7 @@ chat-completions dialect, and which injection mechanism wins?
           assistant message (2 breakpoints, max allowed is 4)
 
 Method: a multi-turn, OpenCode-shaped conversation (large stable system
-prompt ~6k tokens + tool schemas + growing message list) sent DIRECTLY to
+prompt ~35k tokens + tool schemas + growing message list) sent DIRECTLY to
 OpenRouter -- the router is deliberately not involved; the question is
 OpenRouter+provider behavior. Turn N's prompt contains turn N-1's prompt as a
 prefix, so cache reads should appear from turn 2 onward. A final duplicate of
@@ -41,9 +41,9 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "anthropic/claude-haiku-4.5"  # cheap; strictest min-prefix class
 MAX_COMPLETION_TOKENS = 64  # answers don't matter; the prompt side does
 
-# ~6k tokens of deterministic, stable system prompt (~24k chars at ~4 chars/tok).
-# Deliberately boring: byte-identical across turns and runs, like a real
-# harness's frozen system prompt.
+# Deterministic, stable system prompt: measured 141,552 chars (~35,388 tokens
+# at ~4 chars/tok) via --dry-run. Deliberately boring: byte-identical across
+# turns and runs, like a real harness's frozen system prompt.
 SYSTEM_TEXT = "You are a coding agent operating under the following house rules.\n" + "\n".join(
     f"Rule {i}: When working on subsystem {i}, always consult the design document "
     f"revision {i * 7} before editing, run the verification suite tagged v{i}, and "
@@ -177,7 +177,16 @@ def run_mechanism(mechanism: str, out) -> float:
         for label, i, user_text in calls:
             if label == "turn":
                 messages.append({"role": "user", "content": user_text})
-            body = build_body(mechanism, messages)
+                body = build_body(mechanism, messages)
+            else:  # repeat-final
+                # By this point `messages` ends with the last turn's
+                # assistant reply (appended below), so replaying it as-is
+                # would send an assistant-terminated conversation. Some
+                # providers (observed: Anthropic via OpenRouter) 400 on
+                # that shape ("must end with a user message"). Build from
+                # messages[:-1] instead, to exactly reproduce the final
+                # turn's user-ending request.
+                body = build_body(mechanism, messages[:-1])
             resp = call(client, body)
             usage = resp.get("usage", {}) or {}
             cost = float(usage.get("cost") or 0.0)
