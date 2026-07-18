@@ -30,6 +30,10 @@ _CONFIG_ENV = (
     "OPENROUTER_API_KEY",
     "ROUTER_TOKEN",
     "ROUTER_QUIET",
+    # State (ledger) resolution — isolate like config, for the same reason.
+    "SPEND_LEDGER",
+    "LOXO_STATE_DIR",
+    "XDG_STATE_HOME",
 )
 
 
@@ -47,3 +51,4 @@ def isolate_config(tmp_path, monkeypatch):
     empty_xdg.mkdir()
     monkeypatch.chdir(empty_cwd)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(empty_xdg))
+    monkeypatch.setenv("LOXO_STATE_DIR", str(tmp_path / "_empty_state"))

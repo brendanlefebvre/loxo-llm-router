@@ -66,11 +66,15 @@ Configuration (env vars):
   VISION_CLOUD_MODEL     multimodal cloud model to reroute image requests to in
                          cloud/auto-escalation modes (e.g. anthropic/claude-...).
   VISION_OCR_MIN_CHARS   auto-mode threshold; OCR shorter than this escalates.
-  SPEND_LEDGER           path to an append-only JSONL file that persists cloud
-                         spend across restarts (default
-                         ~/.config/loxo-llm-router/spend.jsonl). Set to "" to
-                         disable durability (in-memory only). The file is
-                         read once on startup to seed the accumulator.
+  LOXO_STATE_DIR         root for operational state (ledgers). Default
+                         $XDG_STATE_HOME/loxo-llm-router, i.e. usually
+                         ~/.local/state/loxo-llm-router/. See ledger.py.
+  SPEND_LEDGER           explicit path override for the spend ledger JSONL
+                         (default $LOXO_STATE_DIR/spend.jsonl; a pre-existing
+                         legacy ~/.config/loxo-llm-router/spend.jsonl keeps
+                         working, with a logged pointer). Set to "" to disable
+                         durability (in-memory only). Read once on startup to
+                         seed the accumulator.
 
 Run:
   pip install fastapi uvicorn httpx
@@ -85,7 +89,6 @@ import asyncio
 import hmac
 import json
 import os
-import pathlib
 from datetime import datetime, timezone
 from typing import Any
 
@@ -94,6 +97,7 @@ from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import Config, VirtualModel, load_config
+from .ledger import SpendTracker, resolve_spend_ledger
 
 
 def _ts() -> str:
@@ -127,101 +131,11 @@ def resolve_virtual(model_id: str) -> VirtualModel | None:
     """Return the VirtualModel for a client-facing id, or None for raw ids."""
     return VIRTUAL_MODELS.get(model_id)
 
-_DEFAULT_LEDGER = pathlib.Path.home() / ".config" / "loxo-llm-router" / "spend.jsonl"
-_ledger_env = os.environ.get("SPEND_LEDGER", str(_DEFAULT_LEDGER))
-SPEND_LEDGER = pathlib.Path(_ledger_env) if _ledger_env else None
-
-# --- Spend accumulator ----------------------------------------------------------
-# In-memory totals, seeded from SPEND_LEDGER on startup if configured.
-# Guarded by _spend_lock; never let a ledger write failure break a response.
-# Structure: by_provider[hostname][model] -> {usd, requests}
-_spend_lock = asyncio.Lock()
-_spend_total_usd: float = 0.0
-_spend_requests: int = 0
-_spend_since: str = datetime.now(timezone.utc).isoformat()
-_spend_by_provider: dict[str, dict[str, Any]] = {}  # host -> {total_usd, requests, by_model}
-
 
 def _provider_host(base_url: str) -> str:
     """Extract the hostname from a base URL to use as the provider key."""
     from urllib.parse import urlparse
     return urlparse(base_url).hostname or base_url
-
-
-def _accumulate(provider: str, model: str, usd: float) -> None:
-    """Update in-memory totals (must be called with _spend_lock held)."""
-    global _spend_total_usd, _spend_requests
-    _spend_total_usd += usd
-    _spend_requests += 1
-    if provider not in _spend_by_provider:
-        _spend_by_provider[provider] = {"total_usd": 0.0, "requests": 0, "by_model": {}}
-    p = _spend_by_provider[provider]
-    p["total_usd"] += usd
-    p["requests"] += 1
-    if model not in p["by_model"]:
-        p["by_model"][model] = {"usd": 0.0, "requests": 0}
-    p["by_model"][model]["usd"] += usd
-    p["by_model"][model]["requests"] += 1
-
-
-def _seed_spend_from_ledger() -> None:
-    """Read SPEND_LEDGER at startup and populate the in-memory accumulator."""
-    global _spend_since
-    if not SPEND_LEDGER or not SPEND_LEDGER.exists():
-        return
-    earliest: str | None = None
-    try:
-        for raw in SPEND_LEDGER.read_text().splitlines():
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                entry = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            usd = float(entry.get("usd", 0) or 0)
-            if usd <= 0:
-                continue
-            model = entry.get("model", "unknown")
-            provider = entry.get("provider", "unknown")
-            ts = entry.get("ts", "")
-            _accumulate(provider, model, usd)
-            if ts and (earliest is None or ts < earliest):
-                earliest = ts
-        if earliest:
-            _spend_since = earliest
-    except Exception as e:
-        print(f"{_ts()} [router] spend ledger seed failed ({e}); starting fresh", flush=True)
-
-
-_seed_spend_from_ledger()
-
-
-async def record_cost(provider: str, model: str, usd: float, stream: bool, reason: str) -> None:
-    """Thread-safe: update in-memory totals and append to the JSONL ledger."""
-    if usd <= 0:
-        return
-    async with _spend_lock:
-        _accumulate(provider, model, usd)
-        total = _spend_total_usd
-
-    log(f"[router] cloud cost=${usd:.6f} provider={provider} model={model} total=${total:.6f}")
-
-    if SPEND_LEDGER:
-        entry = json.dumps({
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "provider": provider,
-            "model": model,
-            "usd": usd,
-            "stream": stream,
-            "reason": reason,
-        })
-        try:
-            SPEND_LEDGER.parent.mkdir(parents=True, exist_ok=True)
-            with SPEND_LEDGER.open("a") as f:
-                f.write(entry + "\n")
-        except Exception as e:
-            log(f"[router] spend ledger write failed ({e}); cost still counted in memory")
 
 
 # --- Live rate card -------------------------------------------------------------
@@ -378,6 +292,11 @@ app = FastAPI()
 def log(msg: str) -> None:
     if not QUIET:
         print(f"{_ts()} {msg}", flush=True)
+
+
+# Spend tracking: totals seeded from the resolved ledger (see ledger.py for
+# the LOXO_STATE_DIR / SPEND_LEDGER / legacy-path resolution rules).
+SPEND = SpendTracker(resolve_spend_ledger(log), log=log)
 
 
 def auth_failed(authorization: str | None) -> Response | None:
@@ -739,7 +658,7 @@ async def forward(
     first byte has been yielded — a partially-sent stream cannot be restarted.
 
     cloud_model / cloud_provider: when set, the served response came from cloud
-    and we should extract usage.cost and call record_cost.
+    and we should extract usage.cost and call SPEND.record.
     """
 
     if stream:
@@ -814,8 +733,8 @@ async def forward(
                                 cost_found = c
                 if served_cloud_model and served_cloud_provider and cost_found is not None:
                     asyncio.ensure_future(
-                        record_cost(served_cloud_provider, served_cloud_model,
-                                    cost_found, stream=True, reason=served_reason)
+                        SPEND.record(served_cloud_provider, served_cloud_model,
+                                     cost_found, stream=True, reason=served_reason)
                     )
             finally:
                 await resp.aclose()
@@ -848,8 +767,8 @@ async def forward(
             try:
                 cost = (json.loads(resp.content).get("usage") or {}).get("cost")
                 if cost is not None:
-                    await record_cost(served_cloud_provider, served_cloud_model,
-                                      float(cost), stream=False, reason=served_reason)
+                    await SPEND.record(served_cloud_provider, served_cloud_model,
+                                       float(cost), stream=False, reason=served_reason)
             except Exception:
                 pass
 
@@ -987,36 +906,22 @@ async def spend(authorization: str | None = Header(default=None)):
     if denied is not None:
         return denied
     cards = _rate_cards_snapshot_and_maybe_refresh()
-    async with _spend_lock:
-        return {
-            "total_usd": round(_spend_total_usd, 8),
-            "requests": _spend_requests,
-            "since": _spend_since,
-            "ledger": str(SPEND_LEDGER) if SPEND_LEDGER else None,
-            "rate_cards": cards,
-            "by_provider": {
-                provider: {
-                    "total_usd": round(pv["total_usd"], 8),
-                    "requests": pv["requests"],
-                    "by_model": {
-                        m: {"usd": round(mv["usd"], 8), "requests": mv["requests"]}
-                        for m, mv in sorted(pv["by_model"].items())
-                    },
-                }
-                for provider, pv in sorted(_spend_by_provider.items())
-            },
-        }
+    data = await SPEND.snapshot()
+    return {
+        "total_usd": data["total_usd"],
+        "requests": data["requests"],
+        "since": data["since"],
+        "ledger": str(SPEND.ledger_path) if SPEND.ledger_path else None,
+        "rate_cards": cards,
+        "by_provider": data["by_provider"],
+    }
 
 
 @app.get("/health")
 async def health():
     cards = _rate_cards_snapshot_and_maybe_refresh()
-    async with _spend_lock:
-        spend_summary = {
-            "total_usd": round(_spend_total_usd, 8),
-            "requests": _spend_requests,
-            "since": _spend_since,
-        }
+    data = await SPEND.snapshot()
+    spend_summary = {k: data[k] for k in ("total_usd", "requests", "since")}
     return {
         "status": "ok",
         "local": LOCAL_BASE_URL,
