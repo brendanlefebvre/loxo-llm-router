@@ -23,6 +23,27 @@ OpenAI-compatible: MLX, Ollama, llama.cpp, vLLM, LM Studio.
 > models by *measured* adequacy — the local/frontier "dial" — is the
 > [ROADMAP](ROADMAP.md).
 
+## Who this is for
+
+loxo's cost story is real for some operators and honestly not for others:
+
+- **Pay-per-token users** — you meter API spend today (OpenRouter, direct API
+  keys). Routing chore traffic local and tracking every cloud dollar attacks
+  the bill you actually pay.
+- **Privacy / local-first users** — you want work kept on-device wherever
+  adequacy allows, at any price.
+- **Multi-model routers** — you already mix models per task and want that
+  selection measured instead of vibes-based.
+
+**Not a cost win:** heavy users on subsidized flat-rate subscriptions
+(Claude Max class). Per-token routing cannot beat a subsidized subscription
+by arithmetic — if that's your baseline, loxo earns its keep only on the
+privacy and measurement axes, not price.
+
+Near-term savings concentrate in the **chore traffic** (titles, summaries,
+compaction); shifting main-turn work local is the hard, later win — see the
+[ROADMAP](ROADMAP.md).
+
 ## Quickstart
 
 Install and run:
