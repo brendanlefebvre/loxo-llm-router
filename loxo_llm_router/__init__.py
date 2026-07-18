@@ -87,8 +87,10 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import itertools
 import json
 import os
+import pathlib
 from datetime import datetime, timezone
 from typing import Any
 
@@ -297,6 +299,36 @@ def log(msg: str) -> None:
 # Spend tracking: totals seeded from the resolved ledger (see ledger.py for
 # the LOXO_STATE_DIR / SPEND_LEDGER / legacy-path resolution rules).
 SPEND = SpendTracker(resolve_spend_ledger(log), log=log)
+
+# PREP BRANCH (prep/mac-session): opt-in raw request capture, for grounding the
+# A1 classifier fingerprints and the golden harness fixtures. Bodies contain
+# full message content — never enable in shared environments; captures stay on
+# the operator's machines until sanitized.
+LOXO_CAPTURE_DIR = os.environ.get("LOXO_CAPTURE_DIR", "")
+_capture_seq = itertools.count()
+
+
+def _capture_request(raw: bytes) -> None:
+    """Dump one raw request body to LOXO_CAPTURE_DIR; never break the request."""
+    if not LOXO_CAPTURE_DIR:
+        return
+    try:
+        d = pathlib.Path(LOXO_CAPTURE_DIR)
+        d.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%f")
+        (d / f"req-{ts}-{next(_capture_seq):04d}.json").write_bytes(raw)
+    except Exception as e:  # noqa: BLE001 - capture must never break a request
+        log(f"[router] capture failed ({e}); request unaffected")
+
+
+def _log_cache_usage(model: str, usage: dict[str, Any]) -> None:
+    """PREP BRANCH: B1 validation instrumentation — one log line per cloud
+    response surfacing prompt-cache evidence from the provider's usage object
+    (mechanism per docs/spikes/2026-07-cache-affinity.md)."""
+    ptd = usage.get("prompt_tokens_details") or {}
+    log(f"[router] cache-evidence model={model} "
+        f"prompt_tokens={usage.get('prompt_tokens')} "
+        f"cached_tokens={ptd.get('cached_tokens')} cost={usage.get('cost')}")
 
 
 def auth_failed(authorization: str | None) -> Response | None:
@@ -623,8 +655,9 @@ def _headers_for(url: str, client_headers: dict[str, str]) -> dict[str, str]:
     return h
 
 
-def _extract_cost_from_sse_line(line: bytes) -> float | None:
-    """Parse a single SSE `data: {...}` line; return usage.cost if present."""
+def _extract_usage_from_sse_line(line: bytes) -> dict[str, Any] | None:
+    """Parse a single SSE `data: {...}` line; return the usage object when the
+    chunk carries a non-empty one (the terminal usage chunk), else None."""
     try:
         text = line.decode("utf-8", errors="replace").strip()
         if not text.startswith("data:"):
@@ -632,12 +665,19 @@ def _extract_cost_from_sse_line(line: bytes) -> float | None:
         payload = text[5:].strip()
         if payload == "[DONE]":
             return None
-        obj = json.loads(payload)
-        cost = obj.get("usage", {}) or {}
-        val = cost.get("cost")
-        return float(val) if val is not None else None
+        usage = json.loads(payload).get("usage")
+        return usage if isinstance(usage, dict) and usage else None
     except Exception:
         return None
+
+
+def _extract_cost_from_sse_line(line: bytes) -> float | None:
+    """Parse a single SSE `data: {...}` line; return usage.cost if present."""
+    usage = _extract_usage_from_sse_line(line)
+    if usage is None:
+        return None
+    val = usage.get("cost")
+    return float(val) if val is not None else None
 
 
 async def forward(
@@ -719,7 +759,7 @@ async def forward(
         async def streamer():
             try:
                 buf = b""
-                cost_found: float | None = None
+                usage_found: dict[str, Any] | None = None
                 async for chunk in resp.aiter_raw():
                     yield chunk
                     # Tee: scan for the terminal SSE usage chunk.
@@ -728,13 +768,16 @@ async def forward(
                         # Process complete lines; keep partial tail.
                         while b"\n" in buf:
                             line, buf = buf.split(b"\n", 1)
-                            c = _extract_cost_from_sse_line(line)
-                            if c is not None:
-                                cost_found = c
+                            u = _extract_usage_from_sse_line(line)
+                            if u is not None:
+                                usage_found = u
+                if served_cloud_model and usage_found is not None:
+                    _log_cache_usage(served_cloud_model, usage_found)  # prep branch
+                cost_found = (usage_found or {}).get("cost")
                 if served_cloud_model and served_cloud_provider and cost_found is not None:
                     asyncio.ensure_future(
                         SPEND.record(served_cloud_provider, served_cloud_model,
-                                     cost_found, stream=True, reason=served_reason)
+                                     float(cost_found), stream=True, reason=served_reason)
                     )
             finally:
                 await resp.aclose()
@@ -765,7 +808,10 @@ async def forward(
 
         if served_cloud_model and served_cloud_provider and resp.status_code == 200:
             try:
-                cost = (json.loads(resp.content).get("usage") or {}).get("cost")
+                usage = json.loads(resp.content).get("usage") or {}
+                if usage:
+                    _log_cache_usage(served_cloud_model, usage)  # prep branch
+                cost = usage.get("cost")
                 if cost is not None:
                     await SPEND.record(served_cloud_provider, served_cloud_model,
                                        float(cost), stream=False, reason=served_reason)
@@ -793,6 +839,8 @@ async def chat_completions(
     body_bytes = await request.body()
     body = json.loads(body_bytes)
     stream = bool(body.get("stream", False))
+
+    _capture_request(body_bytes)  # prep branch: pre-rewrite shape, opt-in
 
     requested_vm = resolve_virtual(body.get("model", ""))
     base_url, model_to_send, reason = pick_target(body, x_quality)
@@ -834,6 +882,12 @@ async def chat_completions(
                 else:
                     body.pop("stream_options")
 
+    # PREP BRANCH (B1 validation): auto prompt-cache injection on cloud-bound
+    # bodies, mechanism per the spike decision (docs/spikes/2026-07-cache-affinity.md).
+    # setdefault: client-supplied cache_control is never overridden.
+    if base_url == CLOUD_BASE_URL:
+        body.setdefault("cache_control", {"type": "ephemeral"})
+
     primary_body = json.dumps(body).encode()
 
     log(f"[router] -> {base_url} model={model_to_send} reason={reason}")
@@ -845,6 +899,7 @@ async def chat_completions(
     if cloud_fallback_for(base_url, requested_vm):
         fb = dict(body)
         fb["model"] = fallback_cloud_model
+        fb.setdefault("cache_control", {"type": "ephemeral"})  # prep branch: fb is cloud-bound
         if stream:
             fb["stream_options"] = {**fb.get("stream_options", {}), "include_usage": True}
         fallback_url = CLOUD_BASE_URL
