@@ -21,7 +21,7 @@ def state_env(monkeypatch, tmp_path):
     monkeypatch.delenv("SPEND_LEDGER", raising=False)
     # Point the legacy path somewhere empty by default; tests create it as needed.
     monkeypatch.setattr(ledger, "LEGACY_SPEND_LEDGER", tmp_path / "legacy" / "spend.jsonl")
-    yield
+    return
 
 
 # --- state_dir ----------------------------------------------------------------
@@ -81,7 +81,7 @@ def test_resolve_prefers_new_path_when_it_exists(monkeypatch, tmp_path):
 
 # --- SpendTracker -------------------------------------------------------------
 
-def _tracker(path):
+def _tracker(path: pathlib.Path | None) -> ledger.SpendTracker:
     return ledger.SpendTracker(path)
 
 
@@ -110,7 +110,8 @@ def test_tracker_record_appends_and_accumulates(tmp_path):
     asyncio.run(t.record("openrouter.ai", "m1", 0.2, stream=True, reason="test"))
     lines = [json.loads(x) for x in f.read_text().splitlines()]
     assert len(lines) == 2
-    assert lines[0]["usd"] == 0.1 and lines[0]["stream"] is False
+    assert lines[0]["usd"] == 0.1
+    assert lines[0]["stream"] is False
     snap = asyncio.run(t.snapshot())
     assert snap["total_usd"] == pytest.approx(0.3)
     assert snap["by_provider"]["openrouter.ai"]["requests"] == 2

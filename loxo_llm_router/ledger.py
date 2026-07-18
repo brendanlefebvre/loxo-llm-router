@@ -82,22 +82,23 @@ class SpendTracker:
             return
         earliest: str | None = None
         try:
-            for raw in self.ledger_path.read_text().splitlines():
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    entry = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                usd = float(entry.get("usd", 0) or 0)
-                if usd <= 0:
-                    continue
-                self._accumulate(entry.get("provider", "unknown"),
-                                 entry.get("model", "unknown"), usd)
-                ts = entry.get("ts", "")
-                if ts and (earliest is None or ts < earliest):
-                    earliest = ts
+            with self.ledger_path.open("r", encoding="utf-8") as f:
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        entry = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    usd = float(entry.get("usd", 0) or 0)
+                    if usd <= 0:
+                        continue
+                    self._accumulate(entry.get("provider", "unknown"),
+                                     entry.get("model", "unknown"), usd)
+                    ts = entry.get("ts", "")
+                    if ts and (earliest is None or ts < earliest):
+                        earliest = ts
             if earliest:
                 self._since = earliest
         except Exception as e:  # noqa: BLE001 - a bad ledger must not block startup
@@ -116,7 +117,8 @@ class SpendTracker:
             return
         # Append outside the lock on purpose: O_APPEND keeps concurrent writes
         # byte-safe, and blocking file IO must not serialize the accumulator;
-        # file order may diverge from accumulation order.
+        # file order may diverge from accumulation order. The write itself
+        # runs in a worker thread so it never blocks the event loop.
         entry = json.dumps({
             "ts": datetime.now(timezone.utc).isoformat(),
             "provider": provider,
@@ -125,10 +127,14 @@ class SpendTracker:
             "stream": stream,
             "reason": reason,
         })
-        try:
+
+        def _write_ledger() -> None:
             self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.ledger_path.open("a") as f:
+            with self.ledger_path.open("a", encoding="utf-8") as f:
                 f.write(entry + "\n")
+
+        try:
+            await asyncio.to_thread(_write_ledger)
         except Exception as e:  # noqa: BLE001 - never break a response over the ledger
             self._log(f"[router] spend ledger write failed ({e}); "
                       f"cost still counted in memory")

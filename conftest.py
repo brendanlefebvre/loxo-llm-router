@@ -19,7 +19,12 @@ import tempfile
 # must happen at conftest import (before collection imports the package) —
 # the per-test fixture below runs too late to affect module-level globals.
 # Set unconditionally: a developer's real LOXO_STATE_DIR must not leak in.
-os.environ["LOXO_STATE_DIR"] = tempfile.mkdtemp(prefix="loxo-test-state-")
+# The module-level reference to _temp_state_dir is load-bearing: it keeps the
+# TemporaryDirectory alive for the whole test session (nothing else holds it)
+# and lets it clean itself up at interpreter exit, instead of leaking a
+# mkdtemp'd directory on every test run.
+_temp_state_dir = tempfile.TemporaryDirectory(prefix="loxo-test-state-")
+os.environ["LOXO_STATE_DIR"] = _temp_state_dir.name
 os.environ["SPEND_LEDGER"] = ""  # and never write a ledger from the suite
 
 import pytest

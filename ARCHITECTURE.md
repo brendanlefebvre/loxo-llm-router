@@ -134,12 +134,13 @@ image part untouched and never breaks the request.
   parsed from the JSON body (non-streaming) or teed out of the terminal SSE
   usage chunk (streaming) without delaying the client.
 - Costs accumulate in memory (total, per provider, per model) and append to
-  a JSONL ledger (`SPEND_LEDGER`, default
-  `$LOXO_STATE_DIR/spend.jsonl`, i.e. `~/.local/state/loxo-llm-router/spend.jsonl`;
-  a pre-existing legacy `~/.config/loxo-llm-router/spend.jsonl` keeps working),
-  which re-seeds the accumulator on startup. Ledger writes are best-effort: a
-  write failure never breaks a response (the cost is still counted in
-  memory).
+  a JSONL ledger (`SPEND_LEDGER`, default `$LOXO_STATE_DIR/spend.jsonl`, where
+  the state root resolves `LOXO_STATE_DIR` > `$XDG_STATE_HOME/loxo-llm-router`
+  > `~/.local/state/loxo-llm-router`; a pre-existing legacy
+  `~/.config/loxo-llm-router/spend.jsonl` keeps working, but only while it
+  exists and the new path doesn't), which re-seeds the accumulator on
+  startup. Ledger writes are best-effort: a write failure never breaks a
+  response (the cost is still counted in memory).
 - A **rate card** (per-Mtok pricing, context length, input modalities for
   every distinct `cloud_target`) is fetched from OpenRouter on a TTL
   (`RATE_CARD_TTL`, default 24h). Fetches are non-blocking and best-effort;
