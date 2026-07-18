@@ -77,3 +77,69 @@ def test_resolve_prefers_new_path_when_it_exists(monkeypatch, tmp_path):
     legacy.parent.mkdir(parents=True)
     legacy.write_text('{"usd": 1}\n')
     assert ledger.resolve_spend_ledger() == new  # no silent history fork
+
+
+# --- SpendTracker -------------------------------------------------------------
+
+def _tracker(path):
+    return ledger.SpendTracker(path)
+
+
+def test_tracker_seeds_from_ledger(tmp_path):
+    f = tmp_path / "spend.jsonl"
+    f.write_text(
+        json.dumps({"ts": "2026-07-01T00:00:00+00:00", "provider": "openrouter.ai",
+                    "model": "m1", "usd": 0.5}) + "\n"
+        + "not json\n"                                    # tolerated
+        + json.dumps({"provider": "openrouter.ai", "model": "m1", "usd": 0}) + "\n"  # skipped
+        + json.dumps({"ts": "2026-06-01T00:00:00+00:00", "provider": "other",
+                      "model": "m2", "usd": 0.25}) + "\n"
+    )
+    t = _tracker(f)
+    snap = asyncio.run(t.snapshot())
+    assert snap["total_usd"] == 0.75
+    assert snap["requests"] == 2
+    assert snap["since"] == "2026-06-01T00:00:00+00:00"  # earliest entry wins
+    assert snap["by_provider"]["openrouter.ai"]["by_model"]["m1"]["usd"] == 0.5
+
+
+def test_tracker_record_appends_and_accumulates(tmp_path):
+    f = tmp_path / "sub" / "spend.jsonl"  # parent dir does not exist yet
+    t = _tracker(f)
+    asyncio.run(t.record("openrouter.ai", "m1", 0.1, stream=False, reason="test"))
+    asyncio.run(t.record("openrouter.ai", "m1", 0.2, stream=True, reason="test"))
+    lines = [json.loads(x) for x in f.read_text().splitlines()]
+    assert len(lines) == 2
+    assert lines[0]["usd"] == 0.1 and lines[0]["stream"] is False
+    snap = asyncio.run(t.snapshot())
+    assert snap["total_usd"] == pytest.approx(0.3)
+    assert snap["by_provider"]["openrouter.ai"]["requests"] == 2
+
+
+def test_tracker_zero_cost_is_noop(tmp_path):
+    f = tmp_path / "spend.jsonl"
+    t = _tracker(f)
+    asyncio.run(t.record("p", "m", 0.0, stream=False, reason="test"))
+    assert not f.exists()
+    assert asyncio.run(t.snapshot())["requests"] == 0
+
+
+def test_tracker_disabled_ledger_memory_only():
+    t = _tracker(None)
+    asyncio.run(t.record("p", "m", 0.4, stream=False, reason="test"))
+    assert asyncio.run(t.snapshot())["total_usd"] == 0.4
+
+
+def test_tracker_write_failure_never_raises(tmp_path):
+    blocked = tmp_path / "as-dir"
+    blocked.mkdir()  # opening a directory for append fails
+    t = _tracker(blocked)
+    asyncio.run(t.record("p", "m", 0.4, stream=False, reason="test"))  # must not raise
+    assert asyncio.run(t.snapshot())["total_usd"] == 0.4  # still counted in memory
+
+
+def test_tracker_seed_failure_starts_fresh(tmp_path):
+    unreadable = tmp_path / "dir-as-ledger"
+    unreadable.mkdir()
+    t = _tracker(unreadable)  # read_text on a dir raises internally; must not propagate
+    assert asyncio.run(t.snapshot())["total_usd"] == 0.0
