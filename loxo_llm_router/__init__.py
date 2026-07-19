@@ -232,7 +232,7 @@ def _rate_cards_snapshot_and_maybe_refresh() -> dict[str, dict[str, Any]]:
     now = time.monotonic()
     stale = _rate_cards_fetched_at is None or (now - _rate_cards_fetched_at) >= RATE_CARD_TTL
     if stale:
-        asyncio.ensure_future(get_rate_cards())
+        _spawn(get_rate_cards())
     return dict(_rate_cards)
 
 
@@ -299,6 +299,18 @@ app = FastAPI()
 def log(msg: str) -> None:
     if not QUIET:
         print(f"{_ts()} {msg}", flush=True)
+
+
+# Fire-and-forget background work (ledger writes, rate-card refresh) must hold
+# a strong reference until done: the event loop keeps only weak refs to tasks,
+# so an unreferenced pending Task can be garbage-collected mid-flight.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> None:
+    task = asyncio.ensure_future(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
 # Spend tracking: totals seeded from the resolved ledger (see ledger.py for
@@ -723,7 +735,7 @@ async def forward(
             if obs is not None:
                 obs.status = resp.status_code
                 obs.latency_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
-                asyncio.ensure_future(ADEQUACY.write(obs))
+                _spawn(ADEQUACY.write(obs))
             return JSONResponse(status_code=resp.status_code, content=content)
 
         async def streamer():
@@ -740,7 +752,7 @@ async def forward(
                         scan.feed_line(line)
                 cost_found = (scan.usage or {}).get("cost")
                 if served_cloud_model and served_cloud_provider and cost_found is not None:
-                    asyncio.ensure_future(
+                    _spawn(
                         SPEND.record(served_cloud_provider, served_cloud_model,
                                      float(cost_found), stream=True, reason=served_reason)
                     )
@@ -751,7 +763,7 @@ async def forward(
                     obs.usage = scan.usage
                     obs.usd = float(cost_found) if (served_cloud_model and cost_found) else 0.0
                     obs.latency_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
-                    asyncio.ensure_future(ADEQUACY.write(obs))
+                    _spawn(ADEQUACY.write(obs))
             finally:
                 await resp.aclose()
                 await client.aclose()
@@ -807,7 +819,7 @@ async def forward(
             obs.usd = cost_val
             obs.latency_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
             obs.ttfb_ms = obs.latency_ms  # non-streaming: single read
-            asyncio.ensure_future(ADEQUACY.write(obs))
+            _spawn(ADEQUACY.write(obs))
 
         return Response(
             content=resp.content,
