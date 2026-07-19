@@ -302,6 +302,12 @@ def test_parse_rate_card_unknown_id_returns_none():
     assert R._parse_rate_card(_SAMPLE_MODELS_PAYLOAD, "nope/nope") is None
 
 
+def test_parse_all_rate_cards_covers_whole_catalog():
+    cards = R._parse_all_rate_cards(_SAMPLE_MODELS_PAYLOAD)
+    assert set(cards) == {"z-ai/glm-5.2", "other/model"}
+    assert cards["z-ai/glm-5.2"]["cache_read_per_mtok"] == 0.18
+
+
 def test_virtual_model_entries_shape():
     entries = R._virtual_model_entries()
     assert any(e["id"] == "loxo/auto" for e in entries)
@@ -353,15 +359,6 @@ def test_cloud_fallback_suppressed_for_local_pin():
 
 def test_cloud_fallback_none_when_base_is_cloud():
     assert R.cloud_fallback_for(R.CLOUD_BASE_URL, None) is False
-
-
-def test_distinct_cloud_targets_excludes_none(monkeypatch):
-    monkeypatch.setattr(R, "VIRTUAL_MODELS", {
-        "a": R.VirtualModel(id="a", cloud_target="z-ai/glm-5.2", routing="auto"),
-        "f": R.VirtualModel(id="f", cloud_target="z-ai/glm-4.7-flash", routing="cloud"),
-        "l": R.VirtualModel(id="l", cloud_target=None, routing="local"),
-    })
-    assert R._distinct_cloud_targets() == {"z-ai/glm-5.2", "z-ai/glm-4.7-flash"}
 
 
 # --- _local_pin_preflight: F1 clean 422 for pinned-local hard-fails ----------
@@ -610,9 +607,3 @@ def test_reason_tier_routes_cloud_target(monkeypatch):
     assert reason == "virtual-pinned-cloud"
 
 
-def test_new_tiers_priced_via_distinct_cloud_targets(monkeypatch):
-    # /health prices every distinct cloud target in the registry.
-    monkeypatch.setattr(R, "VIRTUAL_MODELS", R.load_config().tiers)
-    targets = R._distinct_cloud_targets()
-    assert "z-ai/glm-5.2" in targets
-    assert "moonshotai/kimi-k2.6" in targets

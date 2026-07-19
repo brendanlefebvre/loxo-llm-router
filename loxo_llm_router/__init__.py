@@ -186,18 +186,28 @@ def _parse_rate_card(models_payload: dict[str, Any], target_id: str) -> dict[str
     return None
 
 
-def _distinct_cloud_targets() -> set[str]:
-    """Every non-falsy cloud_target in the registry (local-pinned tiers have none)."""
-    return {vm.cloud_target for vm in VIRTUAL_MODELS.values() if vm.cloud_target}
+def _parse_all_rate_cards(models_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """One card per catalog entry. The payload is already the full OpenRouter
+    catalog, so parsing all of it (vs only tier targets) costs nothing extra
+    and gives B1 eligibility data for CLOUD_DEFAULT_MODEL and raw
+    provider-prefixed requests, not only configured tiers."""
+    cards: dict[str, dict[str, Any]] = {}
+    for m in models_payload.get("data", []):
+        mid = m.get("id")
+        if not mid:
+            continue
+        card = _parse_rate_card({"data": [m]}, mid)
+        if card:
+            cards[mid] = card
+    return cards
 
 
 async def get_rate_cards() -> dict[str, dict[str, Any]]:
-    """Fetch + cache rate cards for every distinct cloud_target. Best-effort:
+    """Fetch + cache rate cards for the entire OpenRouter catalog. Best-effort:
     on any failure, leaves the existing cache untouched and returns it."""
     global _rate_cards_fetched_at
     import time
     async with _rate_card_lock:
-        targets = _distinct_cloud_targets()
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 r = await client.get(RATE_CARD_URL)
@@ -206,18 +216,17 @@ async def get_rate_cards() -> dict[str, dict[str, Any]]:
             log(f"[router] rate-card fetch failed ({e}); using stale/empty cards")
             return dict(_rate_cards)
 
-        cards: dict[str, dict[str, Any]] = {}
-        for t in targets:
-            card = _parse_rate_card(payload, t)
-            if not card:
-                continue
-            card["fetched_at"] = datetime.now(timezone.utc).isoformat()
-            cards[t] = card
-            # Self-check: a virtual model declaring vision whose cloud_target is
-            # text-only needs the shim. Assert the former config lie in code.
-            for vm in VIRTUAL_MODELS.values():
-                if vm.cloud_target == t and vm.vision == "shim" and card.get("input_modalities") == ["text"]:
-                    log(f"[router] vision shim required for cloud_target {t} (text-only)")
+        cards = _parse_all_rate_cards(payload)
+        fetched_at = datetime.now(timezone.utc).isoformat()
+        for card in cards.values():
+            card["fetched_at"] = fetched_at
+
+        # Self-check: a virtual model declaring vision whose cloud_target is
+        # text-only needs the shim. Assert the former config lie in code.
+        for vm in VIRTUAL_MODELS.values():
+            card = cards.get(vm.cloud_target)
+            if card and vm.vision == "shim" and card.get("input_modalities") == ["text"]:
+                log(f"[router] vision shim required for cloud_target {vm.cloud_target} (text-only)")
 
         if cards:
             _rate_cards.clear()
