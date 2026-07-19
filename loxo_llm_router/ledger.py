@@ -115,7 +115,11 @@ class SpendTracker:
     async def record(self, provider: str, model: str, usd: float,
                      stream: bool, reason: str,
                      cached_tokens: int = 0, cache_savings_usd: float = 0.0) -> None:
-        if usd <= 0:
+        # A no-cost request with no cache activity is a true no-op. But a
+        # zero-cost request that still carries cache stats (e.g. a fully
+        # cache-hit response) must still be recorded — usd contributes 0,
+        # but requests/cached_tokens/est_cache_savings_usd must accumulate.
+        if usd <= 0 and cached_tokens == 0 and cache_savings_usd == 0:
             return
         async with self._lock:
             self._accumulate(provider, model, usd,

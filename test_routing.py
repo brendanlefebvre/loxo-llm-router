@@ -308,6 +308,19 @@ def test_parse_all_rate_cards_covers_whole_catalog():
     assert cards["z-ai/glm-5.2"]["cache_read_per_mtok"] == 0.18
 
 
+def test_parse_all_rate_cards_skips_malformed_entry():
+    """A single malformed catalog entry (unparsable pricing) must not sink the
+    rest of the catalog — CodeRabbit fix 2's spirit implemented per-entry, so
+    get_rate_cards()'s best-effort contract holds even before its own guard."""
+    payload = {"data": [
+        *_SAMPLE_MODELS_PAYLOAD["data"],
+        {"id": "broken/model", "pricing": {"prompt": "not-a-number"}},
+    ]}
+    cards = R._parse_all_rate_cards(payload)
+    assert set(cards) == {"z-ai/glm-5.2", "other/model"}
+    assert "broken/model" not in cards
+
+
 def test_virtual_model_entries_shape():
     entries = R._virtual_model_entries()
     assert any(e["id"] == "loxo/auto" for e in entries)

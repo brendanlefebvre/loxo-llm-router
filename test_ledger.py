@@ -125,6 +125,28 @@ def test_tracker_zero_cost_is_noop(tmp_path):
     assert asyncio.run(t.snapshot())["requests"] == 0
 
 
+def test_tracker_zero_cost_with_cache_stats_is_recorded(tmp_path):
+    """A zero-cost response can still carry cache stats (e.g. a fully
+    cache-hit request) — usd contributes 0 but the request and its cache
+    stats must not be dropped."""
+    f = tmp_path / "spend.jsonl"
+    t = _tracker(f)
+    asyncio.run(t.record("p", "m", 0.0, stream=False, reason="test",
+                         cached_tokens=500, cache_savings_usd=0.001))
+    assert f.exists()
+    lines = [json.loads(x) for x in f.read_text().splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["usd"] == 0.0
+    assert lines[0]["cached_tokens"] == 500
+    assert lines[0]["cache_savings_usd"] == 0.001
+    snap = asyncio.run(t.snapshot())
+    assert snap["total_usd"] == 0.0
+    assert snap["requests"] == 1
+    model_stats = snap["by_provider"]["p"]["by_model"]["m"]
+    assert model_stats["cached_tokens"] == 500
+    assert model_stats["est_cache_savings_usd"] == pytest.approx(0.001)
+
+
 def test_tracker_disabled_ledger_memory_only():
     t = _tracker(None)
     asyncio.run(t.record("p", "m", 0.4, stream=False, reason="test"))

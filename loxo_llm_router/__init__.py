@@ -196,7 +196,11 @@ def _parse_all_rate_cards(models_payload: dict[str, Any]) -> dict[str, dict[str,
         mid = m.get("id")
         if not mid:
             continue
-        card = _parse_rate_card({"data": [m]}, mid)
+        try:
+            card = _parse_rate_card({"data": [m]}, mid)
+        except Exception as e:  # noqa: BLE001 - one malformed catalog entry shouldn't sink the rest
+            log(f"[router] skipping malformed rate-card entry {mid!r}: {e}")
+            continue
         if card:
             cards[mid] = card
     return cards
@@ -212,21 +216,21 @@ async def get_rate_cards() -> dict[str, dict[str, Any]]:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 r = await client.get(RATE_CARD_URL)
             payload = r.json() if r.status_code == 200 else {}
+
+            cards = _parse_all_rate_cards(payload)
+            fetched_at = datetime.now(timezone.utc).isoformat()
+            for card in cards.values():
+                card["fetched_at"] = fetched_at
+
+            # Self-check: a virtual model declaring vision whose cloud_target is
+            # text-only needs the shim. Assert the former config lie in code.
+            for vm in VIRTUAL_MODELS.values():
+                card = cards.get(vm.cloud_target)
+                if card and vm.vision == "shim" and card.get("input_modalities") == ["text"]:
+                    log(f"[router] vision shim required for cloud_target {vm.cloud_target} (text-only)")
         except Exception as e:  # noqa: BLE001 - pricing is never request-critical
             log(f"[router] rate-card fetch failed ({e}); using stale/empty cards")
             return dict(_rate_cards)
-
-        cards = _parse_all_rate_cards(payload)
-        fetched_at = datetime.now(timezone.utc).isoformat()
-        for card in cards.values():
-            card["fetched_at"] = fetched_at
-
-        # Self-check: a virtual model declaring vision whose cloud_target is
-        # text-only needs the shim. Assert the former config lie in code.
-        for vm in VIRTUAL_MODELS.values():
-            card = cards.get(vm.cloud_target)
-            if card and vm.vision == "shim" and card.get("input_modalities") == ["text"]:
-                log(f"[router] vision shim required for cloud_target {vm.cloud_target} (text-only)")
 
         if cards:
             _rate_cards.clear()
@@ -668,7 +672,6 @@ async def forward(
     reason: str = "",
     fallback_cloud_model: str | None = None,
     obs: "Observation | None" = None,
-    target_card: dict[str, Any] | None = None,
 ):
     """Forward to primary_url; on a transport failure, transparently retry against
     fallback_url (if given). For streaming, the fallback only applies before the
@@ -768,7 +771,8 @@ async def forward(
                         SPEND.record(served_cloud_provider, served_cloud_model,
                                      float(cost_found), stream=True, reason=served_reason,
                                      cached_tokens=int(_cached),
-                                     cache_savings_usd=cache_mod.estimate_savings_usd(scan.usage, target_card))
+                                     cache_savings_usd=cache_mod.estimate_savings_usd(
+                                         scan.usage, _rate_cards.get(served_cloud_model)))
                     )
                 if obs is not None:
                     obs.finish_reason = scan.finish_reason
@@ -820,7 +824,8 @@ async def forward(
                 await SPEND.record(served_cloud_provider, served_cloud_model,
                                    cost_val, stream=False, reason=served_reason,
                                    cached_tokens=int(_cached),
-                                   cache_savings_usd=cache_mod.estimate_savings_usd(scan.usage, target_card))
+                                   cache_savings_usd=cache_mod.estimate_savings_usd(
+                                       scan.usage, _rate_cards.get(served_cloud_model)))
 
         if obs is not None:
             obs.status = resp.status_code
@@ -943,7 +948,6 @@ async def chat_completions(
         fallback_url=fallback_url, fallback_body=fallback_body,
         cloud_model=served_cloud_model, cloud_provider=served_cloud_provider, reason=reason,
         fallback_cloud_model=fallback_cloud_model, obs=obs,
-        target_card=_rate_cards.get(model_to_send) if is_cloud else None,
     )
 
 
