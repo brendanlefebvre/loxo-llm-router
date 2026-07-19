@@ -633,22 +633,6 @@ def _headers_for(url: str, client_headers: dict[str, str]) -> dict[str, str]:
     return h
 
 
-def _extract_usage_from_sse_line(line: bytes) -> dict[str, Any] | None:
-    """Parse a single SSE `data: {...}` line; return the usage object when the
-    chunk carries a non-empty one (the terminal usage chunk), else None."""
-    try:
-        text = line.decode("utf-8", errors="replace").strip()
-        if not text.startswith("data:"):
-            return None
-        payload = text[5:].strip()
-        if payload == "[DONE]":
-            return None
-        usage = json.loads(payload).get("usage")
-        return usage if isinstance(usage, dict) and usage else None
-    except Exception:
-        return None
-
-
 async def forward(
     primary_url: str,
     path: str,
