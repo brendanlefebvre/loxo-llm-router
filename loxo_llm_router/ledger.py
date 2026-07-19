@@ -157,3 +157,163 @@ class SpendTracker:
                     for provider, pv in sorted(self._by_provider.items())
                 },
             }
+
+
+# --- A2: adequacy ledger (observe-only) ----------------------------------------
+# One metadata-only entry per /v1/chat/completions request (spec 2b). Never
+# message content (risk 7). `shadow` ships now, always False, so the v0.3
+# shadow evaluator appends to the same schema instead of migrating it.
+
+from dataclasses import dataclass, field  # noqa: E402
+
+
+@dataclass
+class Observation:
+    """Filled across a request's lifetime: routing fields at dispatch,
+    outcome fields when the response completes."""
+    cls: str
+    classifier_version: int
+    requested_model: str
+    route: str                      # "local" | "cloud"
+    served_model: str
+    reason: str
+    stream: bool
+    status: int | None = None
+    latency_ms: int | None = None
+    ttfb_ms: int | None = None
+    fallback_fired: bool = False
+    finish_reason: str | None = None
+    had_tool_calls: bool = False
+    tool_calls_valid_json: bool | None = None
+    usage: dict[str, Any] | None = field(default=None, repr=False)
+    usd: float = 0.0
+
+    def to_entry(self) -> dict[str, Any]:
+        u = self.usage or {}
+        ptd = u.get("prompt_tokens_details") or {}
+        ctd = u.get("completion_tokens_details") or {}
+        return {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "class": self.cls,
+            "classifier_version": self.classifier_version,
+            "requested_model": self.requested_model,
+            "route": self.route,
+            "served_model": self.served_model,
+            "reason": self.reason,
+            "stream": self.stream,
+            "status": self.status,
+            "latency_ms": self.latency_ms,
+            "ttfb_ms": self.ttfb_ms,
+            "fallback_fired": self.fallback_fired,
+            "finish_reason": self.finish_reason,
+            "had_tool_calls": self.had_tool_calls,
+            "tool_calls_valid_json": self.tool_calls_valid_json,
+            "tokens": {
+                "prompt": u.get("prompt_tokens"),
+                "completion": u.get("completion_tokens"),
+                "reasoning": ctd.get("reasoning_tokens"),
+                "cached": ptd.get("cached_tokens"),
+            },
+            "usd": self.usd,
+            "shadow": False,
+        }
+
+
+class StreamScan:
+    """Accumulates adequacy signals from teed SSE lines (or a non-stream body).
+
+    Signals are computed from the response body, never trusted fields
+    (spec risk 6). Any malformed line is ignored — scanning must never
+    affect the proxied response.
+    """
+
+    def __init__(self) -> None:
+        self.usage: dict[str, Any] | None = None
+        self.finish_reason: str | None = None
+        self.had_tool_calls = False
+        self._tool_args: dict[int, list[str]] = {}
+
+    def feed_line(self, line: bytes) -> None:
+        try:
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text.startswith("data:"):
+                return
+            payload = text[5:].strip()
+            if payload == "[DONE]":
+                return
+            self._feed_obj(json.loads(payload), streaming=True)
+        except Exception:  # noqa: BLE001 - the tee must never break the stream
+            pass
+
+    @classmethod
+    def from_response_body(cls, obj: dict[str, Any]) -> "StreamScan":
+        scan = cls()
+        try:
+            scan._feed_obj(obj, streaming=False)
+        except Exception:  # noqa: BLE001
+            pass
+        return scan
+
+    def _feed_obj(self, obj: dict[str, Any], streaming: bool) -> None:
+        u = obj.get("usage")
+        if isinstance(u, dict) and u:
+            self.usage = u
+        for ch in obj.get("choices") or []:
+            if not isinstance(ch, dict):
+                continue
+            fr = ch.get("finish_reason")
+            if fr:
+                self.finish_reason = fr
+            container = ch.get("delta") if streaming else ch.get("message")
+            for i, tc in enumerate((container or {}).get("tool_calls") or []):
+                if not isinstance(tc, dict):
+                    continue
+                self.had_tool_calls = True
+                idx = tc.get("index", i)
+                args = (tc.get("function") or {}).get("arguments")
+                if args:
+                    self._tool_args.setdefault(idx, []).append(args)
+
+    def tool_calls_valid(self) -> bool | None:
+        if not self.had_tool_calls:
+            return None
+        try:
+            for parts in self._tool_args.values():
+                json.loads("".join(parts))
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+
+def resolve_adequacy_ledger() -> pathlib.Path | None:
+    """$ADEQUACY_LEDGER override ("" disables) > state_dir()/adequacy.jsonl.
+    No legacy fallback — this file has never lived anywhere else."""
+    env = os.environ.get("ADEQUACY_LEDGER")
+    if env is not None:
+        return pathlib.Path(env) if env else None
+    return state_dir() / "adequacy.jsonl"
+
+
+class AdequacyLedger:
+    """Append-only JSONL writer for Observation entries. Same discipline as
+    SpendTracker: threaded IO off the event loop, failures logged not raised."""
+
+    def __init__(self, ledger_path: pathlib.Path | None,
+                 log: Callable[[str], None] = lambda _m: None):
+        self.ledger_path = ledger_path
+        self._log = log
+
+    async def write(self, obs: "Observation") -> None:
+        if not self.ledger_path:
+            return
+        entry = json.dumps(obs.to_entry())
+
+        def _append() -> None:
+            self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.ledger_path.open("a", encoding="utf-8") as f:
+                f.write(entry + "\n")
+
+        try:
+            await asyncio.to_thread(_append)
+        except Exception as e:  # noqa: BLE001 - never break a response over the ledger
+            self._log(f"[router] adequacy ledger write failed ({e}); entry dropped")
