@@ -153,3 +153,27 @@ def test_app_spend_singleton_is_isolated_from_real_state():
     singleton away from any real ledger before the package was imported."""
     import loxo_llm_router as R
     assert R.SPEND.ledger_path is None  # SPEND_LEDGER="" disables persistence
+
+
+# --- B1: cache stats on the spend tracker -------------------------------------
+
+def test_record_accumulates_cache_stats(tmp_path):
+    f = tmp_path / "spend.jsonl"
+    t = _tracker(f)
+    asyncio.run(t.record("p", "m", 0.1, stream=False, reason="r",
+                         cached_tokens=1000, cache_savings_usd=0.002))
+    asyncio.run(t.record("p", "m", 0.1, stream=False, reason="r"))
+    snap = asyncio.run(t.snapshot())
+    m = snap["by_provider"]["p"]["by_model"]["m"]
+    assert m["cached_tokens"] == 1000
+    assert m["est_cache_savings_usd"] == 0.002
+    entries = [json.loads(x) for x in f.read_text().splitlines()]
+    assert entries[0]["cached_tokens"] == 1000
+    assert "cached_tokens" not in entries[1]  # zero -> omitted, entries stay lean
+
+
+def test_seed_tolerates_pre_cache_entries(tmp_path):
+    f = tmp_path / "spend.jsonl"
+    f.write_text(json.dumps({"provider": "p", "model": "m", "usd": 0.5}) + "\n")
+    snap = asyncio.run(_tracker(f).snapshot())
+    assert snap["by_provider"]["p"]["by_model"]["m"]["cached_tokens"] == 0
