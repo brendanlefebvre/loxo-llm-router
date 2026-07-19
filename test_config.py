@@ -25,8 +25,9 @@ def test_defaults_load_loxo_namespace_and_tiers(monkeypatch):
     assert cfg.tiers["loxo/reason"].advertised_context == 262144
     assert cfg.tiers["loxo/local"].routing == "local"
     assert cfg.tiers["loxo/local"].cloud_target is None
-    # local tier's context window defaults to local_context_limit (60000 default)
-    assert cfg.tiers["loxo/local"].advertised_context == cfg.local_context_limit
+    # local tier's context window is no longer defaulted at load time (B3):
+    # None means "derive at serve time" (the local limit, via _virtual_model_entries).
+    assert cfg.tiers["loxo/local"].advertised_context is None
 
 
 def test_toml_file_overrides_defaults(tmp_path, monkeypatch):

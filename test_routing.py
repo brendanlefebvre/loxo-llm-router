@@ -379,7 +379,7 @@ def test_tier_rate_cards_filters_out_the_full_catalog(monkeypatch):
 
 
 def test_virtual_model_entries_shape():
-    entries = R._virtual_model_entries()
+    entries = R._virtual_model_entries({})
     assert any(e["id"] == "loxo/auto" for e in entries)
     e = entries[0]
     assert e["object"] == "model"
@@ -469,9 +469,12 @@ def test_local_preflight_unreachable_returns_422(monkeypatch):
 
 # --- F3: local tier advertises real context limit ----------------------------
 
-def test_local_tier_advertises_local_context_limit():
+def test_local_tier_advertises_local_context_limit(monkeypatch):
     reg = R.load_config().tiers
-    assert reg["loxo/local"].advertised_context == R.LOCAL_CONTEXT_LIMIT
+    assert reg["loxo/local"].advertised_context is None
+    monkeypatch.setattr(R, "VIRTUAL_MODELS", reg)
+    assert ({e["id"]: e for e in R._virtual_model_entries({})}["loxo/local"]["context_length"]
+            == R.LOCAL_CONTEXT_LIMIT)
 
 
 # --- forward(): streaming surfaces upstream non-200 (no masked HTTP 200) ------

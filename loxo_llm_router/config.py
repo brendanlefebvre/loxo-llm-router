@@ -14,7 +14,7 @@ class VirtualModel:
     cloud_target: str | None = None
     local_target: str | None = None
     vision: str = "shim"             # "shim" | "native" | "reject" | "local"
-    advertised_context: int = 1_048_576   # surfaced as context_length in /v1/models
+    advertised_context: int | None = None   # surfaced as context_length in /v1/models; None = derive at serve time
     reasoning: str | None = None     # "low" | "medium" | "high" -> OpenRouter reasoning.effort (B2)
 
 
@@ -110,11 +110,9 @@ def load_config() -> Config:
     for key, t in data.get("tiers", {}).items():
         tid = f"{ns}/{key}"
         routing = t.get("routing", "auto")
-        # Per-tier context window; local tier defaults to the local context limit
-        # so it tracks the backend, mirroring the original registry.
+        # Per-tier context window; None means derive at serve time (B3:
+        # cloud target's rate-card window, or the local limit for local tiers).
         adv = t.get("advertised_context")
-        if adv is None:
-            adv = local_context_limit if routing == "local" else 1_048_576
         reasoning = t.get("reasoning")
         if reasoning is not None and reasoning not in ("low", "medium", "high"):
             raise ValueError(f"tiers.{key}: reasoning must be low|medium|high, got {reasoning!r}")
@@ -124,7 +122,7 @@ def load_config() -> Config:
             cloud_target=t.get("cloud_target"),
             local_target=t.get("local_target"),
             vision=t.get("vision", "shim"),
-            advertised_context=int(adv),
+            advertised_context=int(adv) if adv is not None else None,
             reasoning=reasoning,
         )
 

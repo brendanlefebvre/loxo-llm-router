@@ -988,17 +988,42 @@ async def chat_completions(
     )
 
 
-def _virtual_model_entries() -> list[dict[str, Any]]:
-    """Synthesized /v1/models entries advertising the router's virtual models."""
-    return [
-        {
+def _virtual_model_entries(cards: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Synthesized /v1/models entries for the virtual tiers (B3).
+
+    context_length: explicit advertised_context wins; else the cloud target's
+    rate-card window (a tier with cloud escalation effectively has its cloud
+    context); local-pinned tiers advertise the local limit; unknown card falls
+    back to the 1M ceiling (conservative: harness prompt-size estimates may
+    only err high). Price is advertised as a CEILING — the cloud target's
+    per-token rate; per-call truth flows via usage.cost and /v1/spend.
+    """
+    entries: list[dict[str, Any]] = []
+    for vm in VIRTUAL_MODELS.values():
+        card = cards.get(vm.cloud_target) if vm.cloud_target else None
+        if vm.advertised_context is not None:
+            ctx = vm.advertised_context
+        elif vm.routing == "local":
+            ctx = LOCAL_CONTEXT_LIMIT
+        elif card and card.get("context_length"):
+            ctx = card["context_length"]
+        else:
+            ctx = 1_048_576
+        entry: dict[str, Any] = {
             "id": vm.id,
             "object": "model",
             "owned_by": f"{ROUTER_NS}-llm-router",
-            "context_length": vm.advertised_context,
+            "context_length": ctx,
         }
-        for vm in VIRTUAL_MODELS.values()
-    ]
+        if card and card.get("input_per_mtok") is not None and card.get("output_per_mtok") is not None:
+            def _per_token(rate_per_mtok: float) -> str:
+                return f"{rate_per_mtok / 1_000_000:.10f}".rstrip("0").rstrip(".") or "0"
+            entry["pricing"] = {
+                "prompt": _per_token(card["input_per_mtok"]),
+                "completion": _per_token(card["output_per_mtok"]),
+            }
+        entries.append(entry)
+    return entries
 
 
 @app.get("/v1/models")
@@ -1006,7 +1031,8 @@ async def models(authorization: str | None = Header(default=None)):
     denied = auth_failed(authorization)
     if denied is not None:
         return denied
-    merged: list[dict[str, Any]] = _virtual_model_entries()
+    cards = _rate_cards_snapshot_and_maybe_refresh()
+    merged: list[dict[str, Any]] = _virtual_model_entries(cards)
     async with httpx.AsyncClient(timeout=30.0) as client:
         for base, auth in ((LOCAL_BASE_URL, None), (CLOUD_BASE_URL, OPENROUTER_API_KEY)):
             try:
