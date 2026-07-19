@@ -11,6 +11,7 @@ local_models = []                                  # set per-deployment via TOML
 local_context_limit = 60000
 cloud_default_model = "anthropic/claude-sonnet-4.6"
 
+# reasoning = "low" | "medium" | "high"  — maps to OpenRouter's reasoning.effort on cloud-bound requests (B2)
 [tiers.auto]
 routing = "auto"
 cloud_target = "z-ai/glm-5.2"

@@ -576,6 +576,21 @@ async def apply_vision_policy(
     return _reroute_to_cloud("auto-escalated")
 
 
+def apply_reasoning(body: dict[str, Any], vm: "VirtualModel | None") -> None:
+    """B2: map the tier's reasoning knob to OpenRouter's `reasoning` param on
+    cloud-bound bodies. The client always wins: a client-sent `reasoning`
+    passes through untouched, and OpenAI-style `reasoning_effort` is
+    translated to OpenRouter's shape rather than dropped."""
+    if "reasoning" in body:
+        body.pop("reasoning_effort", None)
+        return
+    effort = body.pop("reasoning_effort", None)
+    if effort is None and vm is not None and vm.reasoning:
+        effort = vm.reasoning
+    if effort is not None:
+        body["reasoning"] = {"effort": effort}
+
+
 def local_target_for(vm: VirtualModel, fallback_model: str) -> str:
     """Resolve the real local model id to send for a virtual request.
 
@@ -925,7 +940,9 @@ async def chat_completions(
     # path itself schedules the rate-card fetch -- otherwise cache injection is
     # inert for clients that never hit /v1/models.
     cards = _rate_cards_snapshot_and_maybe_refresh()
+    # B2: tier reasoning knob -> OpenRouter reasoning.effort; client wins.
     if base_url == CLOUD_BASE_URL:
+        apply_reasoning(body, requested_vm)
         cache_mod.inject_cache(body, cards.get(model_to_send))
 
     primary_body = json.dumps(body).encode()

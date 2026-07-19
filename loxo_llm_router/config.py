@@ -15,6 +15,7 @@ class VirtualModel:
     local_target: str | None = None
     vision: str = "shim"             # "shim" | "native" | "reject" | "local"
     advertised_context: int = 1_048_576   # surfaced as context_length in /v1/models
+    reasoning: str | None = None     # "low" | "medium" | "high" -> OpenRouter reasoning.effort (B2)
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,9 @@ def load_config() -> Config:
         adv = t.get("advertised_context")
         if adv is None:
             adv = local_context_limit if routing == "local" else 1_048_576
+        reasoning = t.get("reasoning")
+        if reasoning is not None and reasoning not in ("low", "medium", "high"):
+            raise ValueError(f"tiers.{key}: reasoning must be low|medium|high, got {reasoning!r}")
         tiers[tid] = VirtualModel(
             id=tid,
             routing=routing,
@@ -121,6 +125,7 @@ def load_config() -> Config:
             local_target=t.get("local_target"),
             vision=t.get("vision", "shim"),
             advertised_context=int(adv),
+            reasoning=reasoning,
         )
 
     return Config(
