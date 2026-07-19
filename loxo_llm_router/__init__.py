@@ -101,6 +101,7 @@ import httpx
 from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from . import cache as cache_mod
 from .classify import classify
 from .config import Config, VirtualModel, load_config
 from .ledger import (AdequacyLedger, Observation, SpendTracker, StreamScan,
@@ -658,6 +659,7 @@ async def forward(
     reason: str = "",
     fallback_cloud_model: str | None = None,
     obs: "Observation | None" = None,
+    target_card: dict[str, Any] | None = None,
 ):
     """Forward to primary_url; on a transport failure, transparently retry against
     fallback_url (if given). For streaming, the fallback only applies before the
@@ -752,9 +754,12 @@ async def forward(
                         scan.feed_line(line)
                 cost_found = (scan.usage or {}).get("cost")
                 if served_cloud_model and served_cloud_provider and cost_found is not None:
+                    _cached = ((scan.usage or {}).get("prompt_tokens_details") or {}).get("cached_tokens") or 0
                     _spawn(
                         SPEND.record(served_cloud_provider, served_cloud_model,
-                                     float(cost_found), stream=True, reason=served_reason)
+                                     float(cost_found), stream=True, reason=served_reason,
+                                     cached_tokens=int(_cached),
+                                     cache_savings_usd=cache_mod.estimate_savings_usd(scan.usage, target_card))
                     )
                 if obs is not None:
                     obs.finish_reason = scan.finish_reason
@@ -802,8 +807,11 @@ async def forward(
             cost = (scan.usage or {}).get("cost")
             if cost is not None:
                 cost_val = float(cost)
+                _cached = ((scan.usage or {}).get("prompt_tokens_details") or {}).get("cached_tokens") or 0
                 await SPEND.record(served_cloud_provider, served_cloud_model,
-                                   cost_val, stream=False, reason=served_reason)
+                                   cost_val, stream=False, reason=served_reason,
+                                   cached_tokens=int(_cached),
+                                   cache_savings_usd=cache_mod.estimate_savings_usd(scan.usage, target_card))
 
         if obs is not None:
             obs.status = resp.status_code
@@ -886,6 +894,11 @@ async def chat_completions(
                 else:
                     body.pop("stream_options")
 
+    # B1: prompt-cache injection (auto mechanism; spike-decided, session-validated).
+    # Eligibility from the live rate card; client-supplied cache_control wins.
+    if base_url == CLOUD_BASE_URL:
+        cache_mod.inject_cache(body, _rate_cards.get(model_to_send))
+
     primary_body = json.dumps(body).encode()
 
     log(f"[router] -> {base_url} model={model_to_send} reason={reason}")
@@ -897,6 +910,7 @@ async def chat_completions(
     if cloud_fallback_for(base_url, requested_vm):
         fb = dict(body)
         fb["model"] = fallback_cloud_model
+        cache_mod.inject_cache(fb, _rate_cards.get(fallback_cloud_model))
         if stream:
             fb["stream_options"] = {**fb.get("stream_options", {}), "include_usage": True}
         fallback_url = CLOUD_BASE_URL
@@ -920,6 +934,7 @@ async def chat_completions(
         fallback_url=fallback_url, fallback_body=fallback_body,
         cloud_model=served_cloud_model, cloud_provider=served_cloud_provider, reason=reason,
         fallback_cloud_model=fallback_cloud_model, obs=obs,
+        target_card=_rate_cards.get(model_to_send) if is_cloud else None,
     )
 
 
