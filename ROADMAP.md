@@ -6,7 +6,7 @@ Adopted 2026-07-15/16, against a v0.1.0 baseline. This document holds *intent* �
 
 **An aspiration, not a description.** None of what follows in this section is true today, and some of it may never be; the roadmap exists to close each gap or to establish, with evidence, why it cannot be closed.
 
-Loxo becomes **the dial that tracks the local/frontier boundary as it moves.** Concretely: you point OpenCode or Pi at Loxo with an OpenRouter key (and optionally a local server URL); local models absorb an evidence-earned, growing share of a real agentic workload; the cost lands at or below what the operator actually spends today; and the session stays good enough that choosing Loxo over the native stacks never feels like a sacrifice.
+Loxo becomes **the dial that tracks the local/frontier boundary as it moves.** Concretely: you point OpenCode, Oh-My-Pi, or Claude Code at Loxo with an OpenRouter key (and optionally a local server URL); local models absorb an evidence-earned, growing share of a real agentic workload; the cost lands at or below what the operator actually spends today; and the session stays good enough that choosing Loxo over the native stacks never feels like a sacrifice.
 
 **Where Loxo actually stands (v0.1.0):** an OpenAI-compatible proxy with heuristic tier routing, local→cloud transport fallback, a vision policy, a spend ledger, and a live rate card. No cache injection, no reasoning passthrough, no request classification, no adequacy measurement, no dial. The distance between that paragraph and this one is the roadmap.
 
@@ -16,14 +16,14 @@ Checkable, in priority order:
 
 1. **Local absorption** — the headline metric: the fraction of real-session tokens served locally *with proven adequacy*, growing release over release. Per-request-class local share is measured, visible, and expands only when evidence supports promotion — the capability neither the foundation harnesses (no local incentive) nor OpenRouter (no local access) can ever offer.
 2. **Cost** — `/v1/spend` for a representative month is at or below what the operator actually pays today on **metered, per-token pricing**. The baseline is deliberately metered spend: against a subsidized flat-rate subscription (Claude Max class) under heavy use, per-token routing cannot win by arithmetic, so that case is out of scope for the cost win and said plainly in the README's "Who this is for" (risk 1 still measures it with real data). Parity is a win; meaningfully more expensive for a similar experience is *the* loss condition.
-3. **Experience floor** — a constraint with teeth, not a vestige: a real working session in OpenCode and in Pi, on `loxo/*` tiers, must stay above "I'd still choose this for real work today," backed by the parity scorecard with per-capability evidence. The floor protects the evidence stream: a dial with no traffic measures nothing — local absorption of zero sessions is zero.
+3. **Experience floor** — a constraint with teeth, not a vestige: a real working session in OpenCode and in Oh-My-Pi (omp), on `loxo/*` tiers, must stay above "I'd still choose this for real work today," backed by the parity scorecard with per-capability evidence. The floor protects the evidence stream: a dial with no traffic measures nothing — local absorption of zero sessions is zero.
 
 **Sequencing honesty:** near-term movement on conditions 1–2 concentrates in the chore classes (titles, summaries, compaction) — exactly the classes where mechanical adequacy signals suffice (A4). Main-turn traffic, where spend actually concentrates, stays cloud until main-turn quality-judging exists (an explicitly deferred open question). First sessions should expect chore-class savings, not big-ticket ones.
 
 ## Explicit non-goals
 
-- Claude Code as a client (no Anthropic `/v1/messages` endpoint) — reassessed at the harness checkpoint (v0.3).
-- Spec-completeness for arbitrary OpenAI-compatible harnesses. OpenCode + Pi are the acceptance tests; fixes are implemented at the dialect level (no user-agent sniffing), so broad compatibility falls out as a byproduct, but the promise stays bounded to the named harnesses.
+- Serving consumer-OAuth credentials. Claude Code *does* enter scope as a client via an Anthropic `/v1/messages` endpoint (B5 — harness checkpoint #1, decided 2026-07-20; see Milestones), but strictly for API-key-pattern clients: Anthropic blocks consumer OAuth tokens (Pro/Max subscriptions) outside its own products, and Loxo will never implement workarounds. That population is already outside the cost win's audience (win condition 2), so the terms boundary and the positioning boundary are the same line.
+- Spec-completeness for arbitrary OpenAI-compatible harnesses. OpenCode + Oh-My-Pi are the acceptance tests; fixes are implemented at the dialect level (no user-agent sniffing), so broad compatibility falls out as a byproduct, but the promise stays bounded to the named harnesses.
 - Automatic, unsupervised promotion of traffic classes to local routing. Promotion changes which model silently serves a class of requests; a wrong promotion is an invisible quality regression — the same failure shape as a fallback that masks a real error. The router's job is to *recommend* promotions with evidence; a human flips the switch. (Automation can be revisited once the adequacy metrics have proven trustworthy.)
 
 ## The honesty mechanism
