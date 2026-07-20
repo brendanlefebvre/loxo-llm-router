@@ -46,3 +46,17 @@ def test_pricing_ceiling_from_card():
     vms = {"loxo/auto": VirtualModel(id="loxo/auto", cloud_target="z-ai/glm-5.2")}
     p = _entries(vms, CARDS)["loxo/auto"]["pricing"]
     assert p == {"prompt": "0.000001", "completion": "0.000004"}  # USD per token, ceiling
+
+
+# --- local non-streaming cost honesty -----------------------------------------
+
+def test_local_nonstream_gets_cost_zero():
+    out = R._inject_local_cost_zero(b'{"usage": {"prompt_tokens": 5}, "choices": []}')
+    import json
+    assert json.loads(out)["usage"]["cost"] == 0
+
+
+def test_local_cost_zero_leaves_existing_cost_and_garbage_alone():
+    assert R._inject_local_cost_zero(b'{"usage": {"cost": 0.5}}') == b'{"usage": {"cost": 0.5}}'
+    assert R._inject_local_cost_zero(b'{"choices": []}') == b'{"choices": []}'
+    assert R._inject_local_cost_zero(b'not json') == b'not json'

@@ -146,6 +146,24 @@ def _provider_host(base_url: str) -> str:
     return urlparse(base_url).hostname or base_url
 
 
+def _inject_local_cost_zero(content: bytes) -> bytes:
+    """B3: local-served non-streaming responses report usage.cost 0 — locally
+    served tokens cost nothing, and saying so beats a harness estimating from
+    the advertised ceiling price. Returns content unchanged when there is no
+    usage block, cost is already present, or the body isn't JSON. Streaming is
+    explicitly out of scope in v0.2 (would require SSE rewriting; spec decision).
+    """
+    try:
+        obj = json.loads(content)
+        usage = obj.get("usage")
+        if not isinstance(usage, dict) or "cost" in usage:
+            return content
+        usage["cost"] = 0
+        return json.dumps(obj).encode()
+    except Exception:  # noqa: BLE001
+        return content
+
+
 # --- Live rate card -------------------------------------------------------------
 # Fetch each virtual model's cloud_target price from OpenRouter and expose it
 # read-only. Purely informational: never blocks or fails a request. Lazy with a
@@ -869,8 +887,13 @@ async def forward(
             obs.ttfb_ms = obs.latency_ms  # non-streaming: single read
             _spawn(ADEQUACY.write(obs))
 
+        content = resp.content
+        served_local = (obs.route == "local" and not obs.fallback_fired) if obs is not None \
+            else served_cloud_model is None
+        if served_local and not stream and resp.status_code == 200:
+            content = _inject_local_cost_zero(content)
         return Response(
-            content=resp.content,
+            content=content,
             status_code=resp.status_code,
             media_type=resp.headers.get("content-type", "application/json"),
         )
