@@ -39,3 +39,11 @@ def test_estimate_savings():
     assert cache.estimate_savings_usd(usage, NO_CACHE_CARD) == 0.0
     assert cache.estimate_savings_usd(None, CARD) == 0.0
     assert cache.estimate_savings_usd({}, CARD) == 0.0
+
+
+def test_estimate_savings_clamped_to_zero_for_negative_input_rate():
+    # A zero (or otherwise below cache_read_per_mtok) input rate must never
+    # produce a negative "savings" figure.
+    usage = {"prompt_tokens_details": {"cached_tokens": 1_000_000}}
+    negative_card = {"input_per_mtok": 0.0, "cache_read_per_mtok": 0.3}
+    assert cache.estimate_savings_usd(usage, negative_card) == 0.0

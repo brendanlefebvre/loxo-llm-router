@@ -7,7 +7,7 @@ docs/spikes/2026-07-cache-affinity.md; validated in a live OpenCode session
 
 Pure functions; eligibility comes from the live rate card (non-null
 cache_read_per_mtok). Missing card => no injection: conservative, and
-self-heals once the rate-card fetch lands.
+self-heals once the chat path's rate-card fetch lands.
 """
 
 from __future__ import annotations
@@ -34,4 +34,4 @@ def estimate_savings_usd(usage: dict[str, Any] | None, card: dict[str, Any] | No
     input_rate = card.get("input_per_mtok")
     if not cached or input_rate is None:
         return 0.0
-    return cached * (input_rate - card["cache_read_per_mtok"]) / 1_000_000
+    return max(0.0, cached * (input_rate - card["cache_read_per_mtok"]) / 1_000_000)

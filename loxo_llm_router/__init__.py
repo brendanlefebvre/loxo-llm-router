@@ -250,6 +250,17 @@ def _rate_cards_snapshot_and_maybe_refresh() -> dict[str, dict[str, Any]]:
     return dict(_rate_cards)
 
 
+def _tier_rate_cards(cards: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Narrow a full rate-card catalog down to what's operationally relevant:
+    configured tier cloud_targets plus CLOUD_DEFAULT_MODEL. The full ~300-model
+    OpenRouter catalog (kept internally in _rate_cards for B1 eligibility) is
+    too much noise for /health and /v1/spend, which only care about the models
+    this router can actually route to."""
+    relevant = {vm.cloud_target for vm in VIRTUAL_MODELS.values() if vm.cloud_target}
+    relevant.add(CLOUD_DEFAULT_MODEL)
+    return {k: v for k, v in cards.items() if k in relevant}
+
+
 # --- Vision shim --------------------------------------------------------------
 # When a request carries image content but the chosen target model is text-only
 # (e.g. GLM-5.2), transcribe each image to text via a local vision model
@@ -910,8 +921,12 @@ async def chat_completions(
 
     # B1: prompt-cache injection (auto mechanism; spike-decided, session-validated).
     # Eligibility from the live rate card; client-supplied cache_control wins.
+    # Snapshot-and-maybe-refresh (not the raw _rate_cards global) so the chat
+    # path itself schedules the rate-card fetch -- otherwise cache injection is
+    # inert for clients that never hit /v1/models.
+    cards = _rate_cards_snapshot_and_maybe_refresh()
     if base_url == CLOUD_BASE_URL:
-        cache_mod.inject_cache(body, _rate_cards.get(model_to_send))
+        cache_mod.inject_cache(body, cards.get(model_to_send))
 
     primary_body = json.dumps(body).encode()
 
@@ -924,7 +939,7 @@ async def chat_completions(
     if cloud_fallback_for(base_url, requested_vm):
         fb = dict(body)
         fb["model"] = fallback_cloud_model
-        cache_mod.inject_cache(fb, _rate_cards.get(fallback_cloud_model))
+        cache_mod.inject_cache(fb, cards.get(fallback_cloud_model))
         if stream:
             fb["stream_options"] = {**fb.get("stream_options", {}), "include_usage": True}
         fallback_url = CLOUD_BASE_URL
@@ -986,9 +1001,9 @@ async def models(authorization: str | None = Header(default=None)):
 async def spend(authorization: str | None = Header(default=None)):
     """Return aggregated cloud spend tracked by this router instance.
 
-    Totals are seeded from SPEND_LEDGER on startup (all-time) and updated
-    live per request. `since` reflects the earliest ledger entry, or the
-    process start time if the ledger is empty or disabled.
+    Totals are seeded from the resolved spend ledger on startup (all-time) and
+    updated live per request. `since` reflects the earliest ledger entry, or
+    the process start time if the ledger is empty or disabled.
     """
     denied = auth_failed(authorization)
     if denied is not None:
@@ -1000,7 +1015,7 @@ async def spend(authorization: str | None = Header(default=None)):
         "requests": data["requests"],
         "since": data["since"],
         "ledger": str(SPEND.ledger_path) if SPEND.ledger_path else None,
-        "rate_cards": cards,
+        "rate_cards": _tier_rate_cards(cards),
         "by_provider": data["by_provider"],
     }
 
@@ -1026,7 +1041,7 @@ async def health():
             "ocr_min_chars": VISION_OCR_MIN_CHARS,
             "vision_capable_models": sorted(VISION_CAPABLE_MODELS),
         },
-        "rate_cards": cards,
+        "rate_cards": _tier_rate_cards(cards),
         "spend": spend_summary,
     }
 
