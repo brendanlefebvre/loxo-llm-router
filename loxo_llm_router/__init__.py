@@ -956,6 +956,11 @@ async def chat_completions(
     if cloud_fallback_for(base_url, requested_vm):
         fb = dict(body)
         fb["model"] = fallback_cloud_model
+        # fb is a copy of the (local-bound) primary body, which never went
+        # through the B2 reasoning translation above (that block only runs for
+        # base_url == CLOUD_BASE_URL). Apply it here so a cloud fallback still
+        # gets the tier's reasoning effort.
+        apply_reasoning(fb, requested_vm)
         cache_mod.inject_cache(fb, cards.get(fallback_cloud_model))
         if stream:
             fb["stream_options"] = {**fb.get("stream_options", {}), "include_usage": True}

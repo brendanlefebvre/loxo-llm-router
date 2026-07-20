@@ -1,5 +1,8 @@
 """Tests for B2: tier reasoning knob -> OpenRouter `reasoning` param."""
 
+import asyncio
+import json
+
 import loxo_llm_router as R
 from loxo_llm_router.config import VirtualModel
 
@@ -48,3 +51,47 @@ def test_config_rejects_bad_reasoning_value(tmp_path, monkeypatch):
     monkeypatch.setenv("LOXO_CONFIG", str(tmp_path / "loxo.toml"))
     with pytest.raises(ValueError, match="reasoning"):
         load_config()
+
+
+class _FakeChatRequest:
+    """Minimal stand-in for fastapi.Request: chat_completions only awaits
+    .body() and reads .headers."""
+    def __init__(self, body: dict):
+        self._body = json.dumps(body).encode()
+        self.headers: dict[str, str] = {}
+
+    async def body(self):
+        return self._body
+
+
+def test_fallback_body_gets_tier_reasoning(monkeypatch):
+    """Bug: on a local-primary route with a cloud fallback, `fb = dict(body)`
+    copies the LOCAL-bound primary body -- which never runs through
+    apply_reasoning, since that block only fires for base_url == CLOUD_BASE_URL.
+    So a client relying on the fallback (e.g. local server down) silently lost
+    the tier's reasoning knob. Fix: call apply_reasoning(fb, requested_vm)
+    before injecting cache on the fallback body.
+
+    This exercises chat_completions directly (with forward() stubbed to avoid
+    any network I/O) rather than a bare apply_reasoning() unit call, since the
+    bug lives in the fallback-body construction inside chat_completions, not
+    in apply_reasoning itself (already covered by the tests above)."""
+    monkeypatch.setitem(R.VIRTUAL_MODELS, "loxo/auto", VirtualModel(
+        id="loxo/auto", cloud_target="z-ai/glm-5.2", routing="auto",
+        vision="shim", reasoning="high"))
+    monkeypatch.setattr(R, "_rate_cards_snapshot_and_maybe_refresh", lambda: {})
+
+    captured = {}
+
+    async def fake_forward(base_url, path, primary_body, headers, stream, **kw):
+        captured["fallback_body"] = kw.get("fallback_body")
+        return R.JSONResponse(content={"ok": True})
+    monkeypatch.setattr(R, "forward", fake_forward)
+
+    body = {"model": "loxo/auto", "messages": [{"role": "user", "content": "hi"}]}
+    asyncio.run(R.chat_completions(
+        _FakeChatRequest(body), x_quality=None, x_vision=None, authorization=None))
+
+    assert captured["fallback_body"] is not None, "expected a cloud fallback to be built"
+    fb = json.loads(captured["fallback_body"])
+    assert fb["reasoning"] == {"effort": "high"}
