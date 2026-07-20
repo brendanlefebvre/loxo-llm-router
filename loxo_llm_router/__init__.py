@@ -80,6 +80,10 @@ Configuration (env vars):
                          Metadata-only: class, route, outcome signals — never
                          message content. Observe-only in v0.2 (no routing
                          reads it).
+  LOXO_CAPTURE_DIR       opt-in: directory to dump each raw request body into
+                         (fixture/classifier tooling). Off when unset. Bodies
+                         contain full message content — never enable in
+                         shared environments.
 
 Run:
   pip install fastapi uvicorn httpx
@@ -92,8 +96,10 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import itertools
 import json
 import os
+import pathlib
 from datetime import datetime, timezone
 from typing import Any
 
@@ -362,6 +368,26 @@ SPEND = SpendTracker(resolve_spend_ledger(log), log=log)
 
 # A2: adequacy ledger (observe-only) — the dial's only evidence source.
 ADEQUACY = AdequacyLedger(resolve_adequacy_ledger(), log=log)
+
+# Opt-in raw request capture, for grounding classifier fingerprints and the
+# golden harness fixtures. Bodies contain full message content — never enable
+# in shared environments; captures stay on the operator's machines until
+# sanitized (scripts/sanitize_capture.py).
+LOXO_CAPTURE_DIR = os.environ.get("LOXO_CAPTURE_DIR", "")
+_capture_seq = itertools.count()
+
+
+def _capture_request(raw: bytes) -> None:
+    """Dump one raw request body to LOXO_CAPTURE_DIR; never break the request."""
+    if not LOXO_CAPTURE_DIR:
+        return
+    try:
+        d = pathlib.Path(LOXO_CAPTURE_DIR)
+        d.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%f")
+        (d / f"req-{ts}-{next(_capture_seq):04d}.json").write_bytes(raw)
+    except Exception as e:  # noqa: BLE001 - capture must never break a request
+        log(f"[router] capture failed ({e}); request unaffected")
 
 
 def auth_failed(authorization: str | None) -> Response | None:
@@ -911,6 +937,7 @@ async def chat_completions(
         return denied
 
     body_bytes = await request.body()
+    _capture_request(body_bytes)  # opt-in; pre-parse, pre-rewrite shape
     body = json.loads(body_bytes)
     requested_model = body.get("model", "")
     stream = bool(body.get("stream", False))
