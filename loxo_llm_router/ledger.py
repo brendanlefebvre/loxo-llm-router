@@ -98,12 +98,17 @@ class SpendTracker:
                     except json.JSONDecodeError:
                         continue
                     usd = float(entry.get("usd", 0) or 0)
-                    if usd <= 0:
+                    cached = int(entry.get("cached_tokens", 0) or 0)
+                    savings = float(entry.get("cache_savings_usd", 0) or 0)
+                    # Mirror record()'s guard: a true no-op (no cost, no cache
+                    # activity) is skipped, but a zero-cost entry that still
+                    # carries cache stats must still be re-accumulated on reload.
+                    if usd <= 0 and cached == 0 and savings == 0:
                         continue
                     self._accumulate(entry.get("provider", "unknown"),
                                      entry.get("model", "unknown"), usd,
-                                     cached_tokens=int(entry.get("cached_tokens", 0) or 0),
-                                     cache_savings_usd=float(entry.get("cache_savings_usd", 0) or 0))
+                                     cached_tokens=cached,
+                                     cache_savings_usd=savings)
                     ts = entry.get("ts", "")
                     if ts and (earliest is None or ts < earliest):
                         earliest = ts

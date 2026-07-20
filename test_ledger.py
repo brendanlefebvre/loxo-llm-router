@@ -123,6 +123,10 @@ def test_tracker_zero_cost_is_noop(tmp_path):
     asyncio.run(t.record("p", "m", 0.0, stream=False, reason="test"))
     assert not f.exists()
     assert asyncio.run(t.snapshot())["requests"] == 0
+    # Reload regression: a true no-op writes nothing, so a fresh tracker
+    # built from the same (nonexistent) file must also seed to zero.
+    reloaded = _tracker(f)
+    assert asyncio.run(reloaded.snapshot())["requests"] == 0
 
 
 def test_tracker_zero_cost_with_cache_stats_is_recorded(tmp_path):
@@ -142,6 +146,24 @@ def test_tracker_zero_cost_with_cache_stats_is_recorded(tmp_path):
     snap = asyncio.run(t.snapshot())
     assert snap["total_usd"] == 0.0
     assert snap["requests"] == 1
+    model_stats = snap["by_provider"]["p"]["by_model"]["m"]
+    assert model_stats["cached_tokens"] == 500
+    assert model_stats["est_cache_savings_usd"] == pytest.approx(0.001)
+
+
+def test_tracker_zero_cost_cache_stats_survive_reload(tmp_path):
+    """Regression: _seed() must mirror record()'s guard. A zero-cost entry
+    that still carries cache stats must not be dropped when the tracker
+    reloads from the ledger file on startup (CodeRabbit PR-12, test_ledger.py:147)."""
+    f = tmp_path / "spend.jsonl"
+    t = _tracker(f)
+    asyncio.run(t.record("p", "m", 0.0, stream=False, reason="test",
+                         cached_tokens=500, cache_savings_usd=0.001))
+
+    reloaded = _tracker(f)
+    snap = asyncio.run(reloaded.snapshot())
+    assert snap["requests"] == 1
+    assert snap["total_usd"] == 0.0
     model_stats = snap["by_provider"]["p"]["by_model"]["m"]
     assert model_stats["cached_tokens"] == 500
     assert model_stats["est_cache_savings_usd"] == pytest.approx(0.001)
