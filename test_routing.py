@@ -11,6 +11,7 @@ abstraction-design.md) can be built without silently regressing existing routes.
 
 import asyncio
 import importlib
+import json
 
 import pytest
 
@@ -302,6 +303,81 @@ def test_parse_rate_card_unknown_id_returns_none():
     assert R._parse_rate_card(_SAMPLE_MODELS_PAYLOAD, "nope/nope") is None
 
 
+def test_parse_all_rate_cards_covers_whole_catalog():
+    cards = R._parse_all_rate_cards(_SAMPLE_MODELS_PAYLOAD)
+    assert set(cards) == {"z-ai/glm-5.2", "other/model"}
+    assert cards["z-ai/glm-5.2"]["cache_read_per_mtok"] == 0.18
+
+
+def test_parse_all_rate_cards_skips_malformed_entry():
+    """A single malformed catalog entry (unparsable pricing) must not sink the
+    rest of the catalog — CodeRabbit fix 2's spirit implemented per-entry, so
+    get_rate_cards()'s best-effort contract holds even before its own guard."""
+    payload = {"data": [
+        *_SAMPLE_MODELS_PAYLOAD["data"],
+        {"id": "broken/model", "pricing": {"prompt": "not-a-number"}},
+    ]}
+    cards = R._parse_all_rate_cards(payload)
+    assert set(cards) == {"z-ai/glm-5.2", "other/model"}
+    assert "broken/model" not in cards
+
+
+class _FakeChatRequest:
+    """Minimal stand-in for fastapi.Request: chat_completions only awaits
+    .body() and reads .headers."""
+    def __init__(self, body: dict):
+        self._body = json.dumps(body).encode()
+        self.headers: dict[str, str] = {}
+
+    async def body(self):
+        return self._body
+
+
+def test_chat_completions_triggers_rate_card_snapshot_and_injects_cache(monkeypatch):
+    """fix 1: the chat path must itself call _rate_cards_snapshot_and_maybe_refresh
+    (not read the raw _rate_cards global) -- otherwise cache injection is inert
+    for clients that never hit /v1/models. Exercises chat_completions directly
+    (not too heavy once forward() is stubbed), so this is the closer-to-
+    integration form rather than a bare "function is referenced" check."""
+    snapshot_calls = []
+    canned_cards = {"some-model": {"input_per_mtok": 3.0, "cache_read_per_mtok": 0.3}}
+
+    def fake_snapshot():
+        snapshot_calls.append(True)
+        return canned_cards
+    monkeypatch.setattr(R, "_rate_cards_snapshot_and_maybe_refresh", fake_snapshot)
+
+    captured = {}
+
+    async def fake_forward(base_url, path, primary_body, headers, stream, **kw):
+        captured["primary_body"] = primary_body
+        return R.JSONResponse(content={"ok": True})
+    monkeypatch.setattr(R, "forward", fake_forward)
+
+    body = {"model": "some-model", "messages": [{"role": "user", "content": "hi"}]}
+    req = _FakeChatRequest(body)
+    asyncio.run(R.chat_completions(req, x_quality="best", x_vision=None, authorization=None))
+
+    assert snapshot_calls, "chat_completions must call _rate_cards_snapshot_and_maybe_refresh"
+    sent = json.loads(captured["primary_body"])
+    assert sent["cache_control"] == {"type": "ephemeral"}
+
+
+def test_tier_rate_cards_filters_out_the_full_catalog(monkeypatch):
+    # fix 2: /health and /v1/spend must not dump the whole ~300-model catalog --
+    # only configured tier cloud_targets + CLOUD_DEFAULT_MODEL are relevant.
+    monkeypatch.setitem(R.VIRTUAL_MODELS, "loxo/fast", R.VirtualModel(
+        id="loxo/fast", cloud_target="z-ai/glm-4.7-flash", routing="cloud", vision="reject"))
+    cards = {
+        "z-ai/glm-5.2": {"model": "z-ai/glm-5.2"},          # loxo/auto's cloud_target
+        "z-ai/glm-4.7-flash": {"model": "z-ai/glm-4.7-flash"},  # loxo/fast's cloud_target
+        "anthropic/claude-sonnet-4.6": {"model": "anthropic/claude-sonnet-4.6"},  # CLOUD_DEFAULT_MODEL
+        "some/stranger-model": {"model": "some/stranger-model"},  # rest of the catalog
+    }
+    out = R._tier_rate_cards(cards)
+    assert set(out) == {"z-ai/glm-5.2", "z-ai/glm-4.7-flash", "anthropic/claude-sonnet-4.6"}
+
+
 def test_virtual_model_entries_shape():
     entries = R._virtual_model_entries()
     assert any(e["id"] == "loxo/auto" for e in entries)
@@ -353,15 +429,6 @@ def test_cloud_fallback_suppressed_for_local_pin():
 
 def test_cloud_fallback_none_when_base_is_cloud():
     assert R.cloud_fallback_for(R.CLOUD_BASE_URL, None) is False
-
-
-def test_distinct_cloud_targets_excludes_none(monkeypatch):
-    monkeypatch.setattr(R, "VIRTUAL_MODELS", {
-        "a": R.VirtualModel(id="a", cloud_target="z-ai/glm-5.2", routing="auto"),
-        "f": R.VirtualModel(id="f", cloud_target="z-ai/glm-4.7-flash", routing="cloud"),
-        "l": R.VirtualModel(id="l", cloud_target=None, routing="local"),
-    })
-    assert R._distinct_cloud_targets() == {"z-ai/glm-5.2", "z-ai/glm-4.7-flash"}
 
 
 # --- _local_pin_preflight: F1 clean 422 for pinned-local hard-fails ----------
@@ -610,9 +677,3 @@ def test_reason_tier_routes_cloud_target(monkeypatch):
     assert reason == "virtual-pinned-cloud"
 
 
-def test_new_tiers_priced_via_distinct_cloud_targets(monkeypatch):
-    # /health prices every distinct cloud target in the registry.
-    monkeypatch.setattr(R, "VIRTUAL_MODELS", R.load_config().tiers)
-    targets = R._distinct_cloud_targets()
-    assert "z-ai/glm-5.2" in targets
-    assert "moonshotai/kimi-k2.6" in targets

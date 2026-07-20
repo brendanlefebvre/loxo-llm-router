@@ -123,6 +123,50 @@ def test_tracker_zero_cost_is_noop(tmp_path):
     asyncio.run(t.record("p", "m", 0.0, stream=False, reason="test"))
     assert not f.exists()
     assert asyncio.run(t.snapshot())["requests"] == 0
+    # Reload regression: a true no-op writes nothing, so a fresh tracker
+    # built from the same (nonexistent) file must also seed to zero.
+    reloaded = _tracker(f)
+    assert asyncio.run(reloaded.snapshot())["requests"] == 0
+
+
+def test_tracker_zero_cost_with_cache_stats_is_recorded(tmp_path):
+    """A zero-cost response can still carry cache stats (e.g. a fully
+    cache-hit request) — usd contributes 0 but the request and its cache
+    stats must not be dropped."""
+    f = tmp_path / "spend.jsonl"
+    t = _tracker(f)
+    asyncio.run(t.record("p", "m", 0.0, stream=False, reason="test",
+                         cached_tokens=500, cache_savings_usd=0.001))
+    assert f.exists()
+    lines = [json.loads(x) for x in f.read_text().splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["usd"] == 0.0
+    assert lines[0]["cached_tokens"] == 500
+    assert lines[0]["cache_savings_usd"] == 0.001
+    snap = asyncio.run(t.snapshot())
+    assert snap["total_usd"] == 0.0
+    assert snap["requests"] == 1
+    model_stats = snap["by_provider"]["p"]["by_model"]["m"]
+    assert model_stats["cached_tokens"] == 500
+    assert model_stats["est_cache_savings_usd"] == pytest.approx(0.001)
+
+
+def test_tracker_zero_cost_cache_stats_survive_reload(tmp_path):
+    """Regression: _seed() must mirror record()'s guard. A zero-cost entry
+    that still carries cache stats must not be dropped when the tracker
+    reloads from the ledger file on startup (CodeRabbit PR-12, test_ledger.py:147)."""
+    f = tmp_path / "spend.jsonl"
+    t = _tracker(f)
+    asyncio.run(t.record("p", "m", 0.0, stream=False, reason="test",
+                         cached_tokens=500, cache_savings_usd=0.001))
+
+    reloaded = _tracker(f)
+    snap = asyncio.run(reloaded.snapshot())
+    assert snap["requests"] == 1
+    assert snap["total_usd"] == 0.0
+    model_stats = snap["by_provider"]["p"]["by_model"]["m"]
+    assert model_stats["cached_tokens"] == 500
+    assert model_stats["est_cache_savings_usd"] == pytest.approx(0.001)
 
 
 def test_tracker_disabled_ledger_memory_only():
@@ -153,3 +197,27 @@ def test_app_spend_singleton_is_isolated_from_real_state():
     singleton away from any real ledger before the package was imported."""
     import loxo_llm_router as R
     assert R.SPEND.ledger_path is None  # SPEND_LEDGER="" disables persistence
+
+
+# --- B1: cache stats on the spend tracker -------------------------------------
+
+def test_record_accumulates_cache_stats(tmp_path):
+    f = tmp_path / "spend.jsonl"
+    t = _tracker(f)
+    asyncio.run(t.record("p", "m", 0.1, stream=False, reason="r",
+                         cached_tokens=1000, cache_savings_usd=0.002))
+    asyncio.run(t.record("p", "m", 0.1, stream=False, reason="r"))
+    snap = asyncio.run(t.snapshot())
+    m = snap["by_provider"]["p"]["by_model"]["m"]
+    assert m["cached_tokens"] == 1000
+    assert m["est_cache_savings_usd"] == 0.002
+    entries = [json.loads(x) for x in f.read_text().splitlines()]
+    assert entries[0]["cached_tokens"] == 1000
+    assert "cached_tokens" not in entries[1]  # zero -> omitted, entries stay lean
+
+
+def test_seed_tolerates_pre_cache_entries(tmp_path):
+    f = tmp_path / "spend.jsonl"
+    f.write_text(json.dumps({"provider": "p", "model": "m", "usd": 0.5}) + "\n")
+    snap = asyncio.run(_tracker(f).snapshot())
+    assert snap["by_provider"]["p"]["by_model"]["m"]["cached_tokens"] == 0

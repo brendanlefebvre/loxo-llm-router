@@ -65,7 +65,8 @@ class SpendTracker:
         self._by_provider: dict[str, dict[str, Any]] = {}
         self._seed()
 
-    def _accumulate(self, provider: str, model: str, usd: float) -> None:
+    def _accumulate(self, provider: str, model: str, usd: float,
+                     cached_tokens: int = 0, cache_savings_usd: float = 0.0) -> None:
         """Update totals (call with _lock held; _seed runs pre-loop, no lock needed)."""
         self._total_usd += usd
         self._requests += 1
@@ -73,9 +74,14 @@ class SpendTracker:
             provider, {"total_usd": 0.0, "requests": 0, "by_model": {}})
         p["total_usd"] += usd
         p["requests"] += 1
-        m = p["by_model"].setdefault(model, {"usd": 0.0, "requests": 0})
+        m = p["by_model"].setdefault(
+            model, {"usd": 0.0, "requests": 0, "cached_tokens": 0, "est_cache_savings_usd": 0.0})
+        m.setdefault("cached_tokens", 0)
+        m.setdefault("est_cache_savings_usd", 0.0)
         m["usd"] += usd
         m["requests"] += 1
+        m["cached_tokens"] += cached_tokens
+        m["est_cache_savings_usd"] += cache_savings_usd
 
     def _seed(self) -> None:
         if not self.ledger_path or not self.ledger_path.exists():
@@ -92,10 +98,17 @@ class SpendTracker:
                     except json.JSONDecodeError:
                         continue
                     usd = float(entry.get("usd", 0) or 0)
-                    if usd <= 0:
+                    cached = int(entry.get("cached_tokens", 0) or 0)
+                    savings = float(entry.get("cache_savings_usd", 0) or 0)
+                    # Mirror record()'s guard: a true no-op (no cost, no cache
+                    # activity) is skipped, but a zero-cost entry that still
+                    # carries cache stats must still be re-accumulated on reload.
+                    if usd <= 0 and cached == 0 and savings == 0:
                         continue
                     self._accumulate(entry.get("provider", "unknown"),
-                                     entry.get("model", "unknown"), usd)
+                                     entry.get("model", "unknown"), usd,
+                                     cached_tokens=cached,
+                                     cache_savings_usd=savings)
                     ts = entry.get("ts", "")
                     if ts and (earliest is None or ts < earliest):
                         earliest = ts
@@ -105,11 +118,17 @@ class SpendTracker:
             self._log(f"[router] spend ledger seed failed ({e}); starting fresh")
 
     async def record(self, provider: str, model: str, usd: float,
-                     stream: bool, reason: str) -> None:
-        if usd <= 0:
+                     stream: bool, reason: str,
+                     cached_tokens: int = 0, cache_savings_usd: float = 0.0) -> None:
+        # A no-cost request with no cache activity is a true no-op. But a
+        # zero-cost request that still carries cache stats (e.g. a fully
+        # cache-hit response) must still be recorded — usd contributes 0,
+        # but requests/cached_tokens/est_cache_savings_usd must accumulate.
+        if usd <= 0 and cached_tokens == 0 and cache_savings_usd == 0:
             return
         async with self._lock:
-            self._accumulate(provider, model, usd)
+            self._accumulate(provider, model, usd,
+                              cached_tokens=cached_tokens, cache_savings_usd=cache_savings_usd)
             total = self._total_usd
         self._log(f"[router] cloud cost=${usd:.6f} provider={provider} "
                   f"model={model} total=${total:.6f}")
@@ -119,14 +138,19 @@ class SpendTracker:
         # byte-safe, and blocking file IO must not serialize the accumulator;
         # file order may diverge from accumulation order. The write itself
         # runs in a worker thread so it never blocks the event loop.
-        entry = json.dumps({
+        entry_dict = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "provider": provider,
             "model": model,
             "usd": usd,
             "stream": stream,
             "reason": reason,
-        })
+        }
+        if cached_tokens:
+            entry_dict["cached_tokens"] = cached_tokens
+        if cache_savings_usd:
+            entry_dict["cache_savings_usd"] = cache_savings_usd
+        entry = json.dumps(entry_dict)
 
         def _write_ledger() -> None:
             self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
@@ -150,7 +174,10 @@ class SpendTracker:
                         "total_usd": round(pv["total_usd"], 8),
                         "requests": pv["requests"],
                         "by_model": {
-                            m: {"usd": round(mv["usd"], 8), "requests": mv["requests"]}
+                            m: {"usd": round(mv["usd"], 8), "requests": mv["requests"],
+                                "cached_tokens": mv.get("cached_tokens", 0),
+                                "est_cache_savings_usd": round(
+                                    mv.get("est_cache_savings_usd", 0.0), 8)}
                             for m, mv in sorted(pv["by_model"].items())
                         },
                     }

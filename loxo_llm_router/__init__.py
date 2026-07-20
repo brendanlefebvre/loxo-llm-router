@@ -101,6 +101,7 @@ import httpx
 from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from . import cache as cache_mod
 from .classify import classify
 from .config import Config, VirtualModel, load_config
 from .ledger import (AdequacyLedger, Observation, SpendTracker, StreamScan,
@@ -185,38 +186,51 @@ def _parse_rate_card(models_payload: dict[str, Any], target_id: str) -> dict[str
     return None
 
 
-def _distinct_cloud_targets() -> set[str]:
-    """Every non-falsy cloud_target in the registry (local-pinned tiers have none)."""
-    return {vm.cloud_target for vm in VIRTUAL_MODELS.values() if vm.cloud_target}
+def _parse_all_rate_cards(models_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """One card per catalog entry. The payload is already the full OpenRouter
+    catalog, so parsing all of it (vs only tier targets) costs nothing extra
+    and gives B1 eligibility data for CLOUD_DEFAULT_MODEL and raw
+    provider-prefixed requests, not only configured tiers."""
+    cards: dict[str, dict[str, Any]] = {}
+    for m in models_payload.get("data", []):
+        mid = m.get("id")
+        if not mid:
+            continue
+        try:
+            card = _parse_rate_card({"data": [m]}, mid)
+        except Exception as e:  # noqa: BLE001 - one malformed catalog entry shouldn't sink the rest
+            log(f"[router] skipping malformed rate-card entry {mid!r}: {e}")
+            continue
+        if card:
+            cards[mid] = card
+    return cards
 
 
 async def get_rate_cards() -> dict[str, dict[str, Any]]:
-    """Fetch + cache rate cards for every distinct cloud_target. Best-effort:
+    """Fetch + cache rate cards for the entire OpenRouter catalog. Best-effort:
     on any failure, leaves the existing cache untouched and returns it."""
     global _rate_cards_fetched_at
     import time
     async with _rate_card_lock:
-        targets = _distinct_cloud_targets()
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 r = await client.get(RATE_CARD_URL)
             payload = r.json() if r.status_code == 200 else {}
-        except Exception as e:  # noqa: BLE001 - pricing is never request-critical
-            log(f"[router] rate-card fetch failed ({e}); using stale/empty cards")
-            return dict(_rate_cards)
 
-        cards: dict[str, dict[str, Any]] = {}
-        for t in targets:
-            card = _parse_rate_card(payload, t)
-            if not card:
-                continue
-            card["fetched_at"] = datetime.now(timezone.utc).isoformat()
-            cards[t] = card
+            cards = _parse_all_rate_cards(payload)
+            fetched_at = datetime.now(timezone.utc).isoformat()
+            for card in cards.values():
+                card["fetched_at"] = fetched_at
+
             # Self-check: a virtual model declaring vision whose cloud_target is
             # text-only needs the shim. Assert the former config lie in code.
             for vm in VIRTUAL_MODELS.values():
-                if vm.cloud_target == t and vm.vision == "shim" and card.get("input_modalities") == ["text"]:
-                    log(f"[router] vision shim required for cloud_target {t} (text-only)")
+                card = cards.get(vm.cloud_target)
+                if card and vm.vision == "shim" and card.get("input_modalities") == ["text"]:
+                    log(f"[router] vision shim required for cloud_target {vm.cloud_target} (text-only)")
+        except Exception as e:  # noqa: BLE001 - pricing is never request-critical
+            log(f"[router] rate-card fetch failed ({e}); using stale/empty cards")
+            return dict(_rate_cards)
 
         if cards:
             _rate_cards.clear()
@@ -234,6 +248,17 @@ def _rate_cards_snapshot_and_maybe_refresh() -> dict[str, dict[str, Any]]:
     if stale:
         _spawn(get_rate_cards())
     return dict(_rate_cards)
+
+
+def _tier_rate_cards(cards: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Narrow a full rate-card catalog down to what's operationally relevant:
+    configured tier cloud_targets plus CLOUD_DEFAULT_MODEL. The full ~300-model
+    OpenRouter catalog (kept internally in _rate_cards for B1 eligibility) is
+    too much noise for /health and /v1/spend, which only care about the models
+    this router can actually route to."""
+    relevant = {vm.cloud_target for vm in VIRTUAL_MODELS.values() if vm.cloud_target}
+    relevant.add(CLOUD_DEFAULT_MODEL)
+    return {k: v for k, v in cards.items() if k in relevant}
 
 
 # --- Vision shim --------------------------------------------------------------
@@ -752,9 +777,13 @@ async def forward(
                         scan.feed_line(line)
                 cost_found = (scan.usage or {}).get("cost")
                 if served_cloud_model and served_cloud_provider and cost_found is not None:
+                    _cached = ((scan.usage or {}).get("prompt_tokens_details") or {}).get("cached_tokens") or 0
                     _spawn(
                         SPEND.record(served_cloud_provider, served_cloud_model,
-                                     float(cost_found), stream=True, reason=served_reason)
+                                     float(cost_found), stream=True, reason=served_reason,
+                                     cached_tokens=int(_cached),
+                                     cache_savings_usd=cache_mod.estimate_savings_usd(
+                                         scan.usage, _rate_cards.get(served_cloud_model)))
                     )
                 if obs is not None:
                     obs.finish_reason = scan.finish_reason
@@ -802,8 +831,12 @@ async def forward(
             cost = (scan.usage or {}).get("cost")
             if cost is not None:
                 cost_val = float(cost)
+                _cached = ((scan.usage or {}).get("prompt_tokens_details") or {}).get("cached_tokens") or 0
                 await SPEND.record(served_cloud_provider, served_cloud_model,
-                                   cost_val, stream=False, reason=served_reason)
+                                   cost_val, stream=False, reason=served_reason,
+                                   cached_tokens=int(_cached),
+                                   cache_savings_usd=cache_mod.estimate_savings_usd(
+                                       scan.usage, _rate_cards.get(served_cloud_model)))
 
         if obs is not None:
             obs.status = resp.status_code
@@ -886,6 +919,15 @@ async def chat_completions(
                 else:
                     body.pop("stream_options")
 
+    # B1: prompt-cache injection (auto mechanism; spike-decided, session-validated).
+    # Eligibility from the live rate card; client-supplied cache_control wins.
+    # Snapshot-and-maybe-refresh (not the raw _rate_cards global) so the chat
+    # path itself schedules the rate-card fetch -- otherwise cache injection is
+    # inert for clients that never hit /v1/models.
+    cards = _rate_cards_snapshot_and_maybe_refresh()
+    if base_url == CLOUD_BASE_URL:
+        cache_mod.inject_cache(body, cards.get(model_to_send))
+
     primary_body = json.dumps(body).encode()
 
     log(f"[router] -> {base_url} model={model_to_send} reason={reason}")
@@ -897,6 +939,7 @@ async def chat_completions(
     if cloud_fallback_for(base_url, requested_vm):
         fb = dict(body)
         fb["model"] = fallback_cloud_model
+        cache_mod.inject_cache(fb, cards.get(fallback_cloud_model))
         if stream:
             fb["stream_options"] = {**fb.get("stream_options", {}), "include_usage": True}
         fallback_url = CLOUD_BASE_URL
@@ -958,9 +1001,9 @@ async def models(authorization: str | None = Header(default=None)):
 async def spend(authorization: str | None = Header(default=None)):
     """Return aggregated cloud spend tracked by this router instance.
 
-    Totals are seeded from SPEND_LEDGER on startup (all-time) and updated
-    live per request. `since` reflects the earliest ledger entry, or the
-    process start time if the ledger is empty or disabled.
+    Totals are seeded from the resolved spend ledger on startup (all-time) and
+    updated live per request. `since` reflects the earliest ledger entry, or
+    the process start time if the ledger is empty or disabled.
     """
     denied = auth_failed(authorization)
     if denied is not None:
@@ -972,7 +1015,7 @@ async def spend(authorization: str | None = Header(default=None)):
         "requests": data["requests"],
         "since": data["since"],
         "ledger": str(SPEND.ledger_path) if SPEND.ledger_path else None,
-        "rate_cards": cards,
+        "rate_cards": _tier_rate_cards(cards),
         "by_provider": data["by_provider"],
     }
 
@@ -998,7 +1041,7 @@ async def health():
             "ocr_min_chars": VISION_OCR_MIN_CHARS,
             "vision_capable_models": sorted(VISION_CAPABLE_MODELS),
         },
-        "rate_cards": cards,
+        "rate_cards": _tier_rate_cards(cards),
         "spend": spend_summary,
     }
 
