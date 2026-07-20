@@ -75,6 +75,11 @@ Configuration (env vars):
                          working, with a logged pointer). Set to "" to disable
                          durability (in-memory only). Read once on startup to
                          seed the accumulator.
+  ADEQUACY_LEDGER        path override for the A2 adequacy ledger JSONL
+                         (default $LOXO_STATE_DIR/adequacy.jsonl; "" disables).
+                         Metadata-only: class, route, outcome signals — never
+                         message content. Observe-only in v0.2 (no routing
+                         reads it).
 
 Run:
   pip install fastapi uvicorn httpx
@@ -96,8 +101,10 @@ import httpx
 from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from .classify import classify
 from .config import Config, VirtualModel, load_config
-from .ledger import SpendTracker, resolve_spend_ledger
+from .ledger import (AdequacyLedger, Observation, SpendTracker, StreamScan,
+                     resolve_adequacy_ledger, resolve_spend_ledger)
 
 
 def _ts() -> str:
@@ -225,7 +232,7 @@ def _rate_cards_snapshot_and_maybe_refresh() -> dict[str, dict[str, Any]]:
     now = time.monotonic()
     stale = _rate_cards_fetched_at is None or (now - _rate_cards_fetched_at) >= RATE_CARD_TTL
     if stale:
-        asyncio.ensure_future(get_rate_cards())
+        _spawn(get_rate_cards())
     return dict(_rate_cards)
 
 
@@ -294,9 +301,24 @@ def log(msg: str) -> None:
         print(f"{_ts()} {msg}", flush=True)
 
 
+# Fire-and-forget background work (ledger writes, rate-card refresh) must hold
+# a strong reference until done: the event loop keeps only weak refs to tasks,
+# so an unreferenced pending Task can be garbage-collected mid-flight.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> None:
+    task = asyncio.ensure_future(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
 # Spend tracking: totals seeded from the resolved ledger (see ledger.py for
 # the LOXO_STATE_DIR / SPEND_LEDGER / legacy-path resolution rules).
 SPEND = SpendTracker(resolve_spend_ledger(log), log=log)
+
+# A2: adequacy ledger (observe-only) — the dial's only evidence source.
+ADEQUACY = AdequacyLedger(resolve_adequacy_ledger(), log=log)
 
 
 def auth_failed(authorization: str | None) -> Response | None:
@@ -623,23 +645,6 @@ def _headers_for(url: str, client_headers: dict[str, str]) -> dict[str, str]:
     return h
 
 
-def _extract_cost_from_sse_line(line: bytes) -> float | None:
-    """Parse a single SSE `data: {...}` line; return usage.cost if present."""
-    try:
-        text = line.decode("utf-8", errors="replace").strip()
-        if not text.startswith("data:"):
-            return None
-        payload = text[5:].strip()
-        if payload == "[DONE]":
-            return None
-        obj = json.loads(payload)
-        cost = obj.get("usage", {}) or {}
-        val = cost.get("cost")
-        return float(val) if val is not None else None
-    except Exception:
-        return None
-
-
 async def forward(
     primary_url: str,
     path: str,
@@ -652,6 +657,7 @@ async def forward(
     cloud_provider: str | None = None,
     reason: str = "",
     fallback_cloud_model: str | None = None,
+    obs: "Observation | None" = None,
 ):
     """Forward to primary_url; on a transport failure, transparently retry against
     fallback_url (if given). For streaming, the fallback only applies before the
@@ -659,7 +665,11 @@ async def forward(
 
     cloud_model / cloud_provider: when set, the served response came from cloud
     and we should extract usage.cost and call SPEND.record.
+
+    obs: when set, filled with the outcome (A2, observe-only) and written to
+    ADEQUACY once the response lands. Never affects routing or the bytes sent.
     """
+    _t0 = asyncio.get_event_loop().time()
 
     if stream:
         client = httpx.AsyncClient(timeout=TIMEOUT)
@@ -698,6 +708,14 @@ async def forward(
                 raise
             break
 
+        if obs is not None:
+            obs.ttfb_ms = int((asyncio.get_event_loop().time() - _t0) * 1000) if _t0 else None
+            obs.status = resp.status_code
+            if served_reason == "fallback":
+                obs.fallback_fired = True
+                obs.route, obs.served_model = "cloud", served_cloud_model or ""
+                obs.reason = "fallback"
+
         if resp.status_code != 200:
             err = await resp.aread()
             await resp.aclose()
@@ -714,28 +732,38 @@ async def forward(
                 }}
             log(f"[router] stream: upstream {url} returned {resp.status_code}; "
                 f"surfacing status (no masked 200)")
+            if obs is not None:
+                obs.status = resp.status_code
+                obs.latency_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
+                _spawn(ADEQUACY.write(obs))
             return JSONResponse(status_code=resp.status_code, content=content)
 
         async def streamer():
             try:
                 buf = b""
-                cost_found: float | None = None
+                scan = StreamScan()
                 async for chunk in resp.aiter_raw():
                     yield chunk
-                    # Tee: scan for the terminal SSE usage chunk.
-                    if served_cloud_model:
-                        buf += chunk
-                        # Process complete lines; keep partial tail.
-                        while b"\n" in buf:
-                            line, buf = buf.split(b"\n", 1)
-                            c = _extract_cost_from_sse_line(line)
-                            if c is not None:
-                                cost_found = c
+                    # Tee: adequacy signals for every route; usage/cost for cloud.
+                    buf += chunk
+                    # Process complete lines; keep partial tail.
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        scan.feed_line(line)
+                cost_found = (scan.usage or {}).get("cost")
                 if served_cloud_model and served_cloud_provider and cost_found is not None:
-                    asyncio.ensure_future(
+                    _spawn(
                         SPEND.record(served_cloud_provider, served_cloud_model,
-                                     cost_found, stream=True, reason=served_reason)
+                                     float(cost_found), stream=True, reason=served_reason)
                     )
+                if obs is not None:
+                    obs.finish_reason = scan.finish_reason
+                    obs.had_tool_calls = scan.had_tool_calls
+                    obs.tool_calls_valid_json = scan.tool_calls_valid()
+                    obs.usage = scan.usage
+                    obs.usd = float(cost_found) if (served_cloud_model and cost_found) else 0.0
+                    obs.latency_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
+                    _spawn(ADEQUACY.write(obs))
             finally:
                 await resp.aclose()
                 await client.aclose()
@@ -763,14 +791,35 @@ async def forward(
             served_cloud_provider = _provider_host(CLOUD_BASE_URL)
             served_reason = "fallback"
 
-        if served_cloud_model and served_cloud_provider and resp.status_code == 200:
+        cost_val = 0.0
+        scan: StreamScan | None = None
+        if resp.status_code == 200:
             try:
-                cost = (json.loads(resp.content).get("usage") or {}).get("cost")
-                if cost is not None:
-                    await SPEND.record(served_cloud_provider, served_cloud_model,
-                                       float(cost), stream=False, reason=served_reason)
+                scan = StreamScan.from_response_body(json.loads(resp.content))
             except Exception:
-                pass
+                scan = None
+        if served_cloud_model and served_cloud_provider and scan is not None:
+            cost = (scan.usage or {}).get("cost")
+            if cost is not None:
+                cost_val = float(cost)
+                await SPEND.record(served_cloud_provider, served_cloud_model,
+                                   cost_val, stream=False, reason=served_reason)
+
+        if obs is not None:
+            obs.status = resp.status_code
+            if served_reason == "fallback":
+                obs.fallback_fired = True
+                obs.route, obs.served_model = "cloud", served_cloud_model or ""
+                obs.reason = "fallback"
+            if scan is not None:
+                obs.finish_reason = scan.finish_reason
+                obs.had_tool_calls = scan.had_tool_calls
+                obs.tool_calls_valid_json = scan.tool_calls_valid()
+                obs.usage = scan.usage
+            obs.usd = cost_val
+            obs.latency_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
+            obs.ttfb_ms = obs.latency_ms  # non-streaming: single read
+            _spawn(ADEQUACY.write(obs))
 
         return Response(
             content=resp.content,
@@ -792,7 +841,10 @@ async def chat_completions(
 
     body_bytes = await request.body()
     body = json.loads(body_bytes)
+    requested_model = body.get("model", "")
     stream = bool(body.get("stream", False))
+
+    klass = classify(body)  # A1: observe-only, before any body rewrite
 
     requested_vm = resolve_virtual(body.get("model", ""))
     base_url, model_to_send, reason = pick_target(body, x_quality)
@@ -855,11 +907,19 @@ async def chat_completions(
     served_cloud_model = model_to_send if is_cloud else None
     served_cloud_provider = _provider_host(CLOUD_BASE_URL) if is_cloud else None
 
+    # A2: one observation per request, filled by forward() as the outcome lands.
+    obs = Observation(
+        cls=klass.cls, classifier_version=klass.version,
+        requested_model=requested_model,
+        route="cloud" if is_cloud else "local",
+        served_model=model_to_send, reason=reason, stream=stream,
+    )
+
     return await forward(
         base_url, "/chat/completions", primary_body, dict(request.headers), stream,
         fallback_url=fallback_url, fallback_body=fallback_body,
         cloud_model=served_cloud_model, cloud_provider=served_cloud_provider, reason=reason,
-        fallback_cloud_model=fallback_cloud_model,
+        fallback_cloud_model=fallback_cloud_model, obs=obs,
     )
 
 

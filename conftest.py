@@ -26,6 +26,7 @@ import tempfile
 _temp_state_dir = tempfile.TemporaryDirectory(prefix="loxo-test-state-")
 os.environ["LOXO_STATE_DIR"] = _temp_state_dir.name
 os.environ["SPEND_LEDGER"] = ""  # and never write a ledger from the suite
+os.environ["ADEQUACY_LEDGER"] = ""  # observe-only machinery must not write during tests
 
 import pytest
 
