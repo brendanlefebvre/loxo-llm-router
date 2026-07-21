@@ -110,7 +110,7 @@ Rules:
 - The central store is additive aggregation and backup only. Local operation never depends on it: a down collector costs sync lag, not routing.
 - Ledgers remain metadata-only (see risk 7), so pooling adds minimal sensitivity.
 
-Implementation waits for the second operator or the first real backup need, whichever comes first; until then, the invariants are the deliverable.
+Implementation lands in v0.3 ("Operator-ready"): that release exists to produce the second operator, so the deferral trigger fires just-in-time — collector v1 is deployed and the router gains an opt-in push client (unset/`""` = fully off) ahead of recruitment. The invariants above govern the build; transport, deployment target, and operational cost are decided in the collector's own spec.
 
 ### Testing strategy
 
@@ -125,16 +125,15 @@ Implementation waits for the second operator or the first real backup need, whic
 1. **Subscription economics.** If the operator's real baseline is a subsidized flat-rate plan (Claude Max class), per-token routing may be structurally unable to match it for heavy usage. *Disposition: the scorecard's cost section answers this with a month of real data — producing that answer is a win condition, not a failure.*
 2. **Cache affinity through OpenRouter.** Anthropic cache hits require consecutive requests to land on the same provider. Partially pre-solved: OpenRouter documents "provider sticky routing" after cached requests, deliberately routing follow-ups to the same provider to maximize hits. *Disposition: still spike this first in v0.2 — docs describing sticky routing and a real OpenCode session showing cache-read tokens in `/v1/spend` are different things. If observed hit rates disappoint, the cost leg of the vision needs redesign, and we want to know in week one.*
 3. **Classifier fragility.** Heuristic classification breaks when harnesses change their request shapes between versions. *Disposition: observe-only start, `unknown` as the safe default class, per-version golden fixtures.*
-4. **Harness-side tuning gap.** Claude Code's prompts are tuned for Claude; OpenCode/Pi are model-agnostic. Some experience gap lives in the harness and no router can close it. *Disposition: named and measured in the scorecard rather than silently absorbed as Loxo's failure.*
+4. **Harness-side tuning gap.** Claude Code's prompts are tuned for Claude; OpenCode/omp are model-agnostic. Some experience gap lives in the harness and no router can close it. *Disposition: named and measured in the scorecard rather than silently absorbed as Loxo's failure.*
 5. **Shadow load on the working machine.** Shadow evaluation competes for the same GPU/memory as the operator's interactive local traffic. *Disposition: opt-in, per-class sampling rates, and a kill switch; idle-aware scheduling is future work.*
 6. **Local server variance.** Local OpenAI-compatible servers differ in usage reporting and tool-call fidelity. *Disposition: token counts fall back to estimation when usage is absent; adequacy signals are computed from the response body, not trusted fields.*
 7. **Ledger privacy.** Ledgers record metadata (class, model, counts, outcomes), never message content; shadow evaluation sends content only to the local backend, adding zero new cloud exposure. The future central collector inherits this posture: it aggregates the same metadata-only files, authenticated by token, and holds nothing an operator's local ledger doesn't already hold.
-8. **Evidence-supply bootstrapping.** The dial promotes only on real-session evidence (A7), but one operator's sessions may not cover all classes at volume — and the operators who would supply that volume are attracted by a dial that already demonstrably works. *Disposition: the bench suite de-risks model screening without traffic; the pooling invariants (implementation notes above) keep multi-operator support cheap to add; recruitment itself is a distribution problem, not an engineering one — tracked in issue [#6](https://github.com/brendanlefebvre/loxo-llm-router/issues/6), targeted after v0.2 ships an adequacy ledger worth pooling.*
+8. **Evidence-supply bootstrapping.** The dial promotes only on real-session evidence (A7), but one operator's sessions may not cover all classes at volume — and the operators who would supply that volume are attracted by a dial that already demonstrably works. *Disposition: the bench suite de-risks model screening without traffic; the pooling invariants (implementation notes above) keep multi-operator support cheap to add; recruitment itself is a distribution problem, not an engineering one — tracked in issue [#6](https://github.com/brendanlefebvre/loxo-llm-router/issues/6), activated after v0.3 — the operator-ready release built to be recruitment's landing page.*
 
 ## Open questions (deferred, tracked here so they aren't lost)
 
 - Quality-judging for main-turn classes (LLM-judge comparison of shadow outputs) — required before the dial can ever move main-turn traffic.
-- Central ledger collector transport (HTTP push to a small collector service vs. object storage) — decided when the second operator or first backup need arrives; the append-only invariants above keep both options open.
+- Central ledger collector transport (HTTP push to a small collector service vs. object storage) — decided in the v0.3 collector spec; the append-only invariants above keep both options open.
 - Idle-aware shadow scheduling.
-- Whether `/v1/messages` (Claude Code as client) enters scope at harness checkpoint #1.
 - Automatic promotion, revisited only after adequacy metrics have a track record a human has learned to trust.
