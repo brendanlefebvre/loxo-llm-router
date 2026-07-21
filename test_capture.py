@@ -1,5 +1,8 @@
 """Tests for LOXO_CAPTURE_DIR: opt-in raw request capture (fixture tooling)."""
 
+import os
+import stat
+
 import loxo_llm_router as R
 
 
@@ -16,6 +19,17 @@ def test_capture_writes_raw_body(tmp_path, monkeypatch):
     files = list((tmp_path / "caps").glob("req-*.json"))
     assert len(files) == 1
     assert files[0].read_bytes() == raw  # byte-exact, pre-rewrite
+
+
+def test_capture_writes_owner_only_perms(tmp_path, monkeypatch):
+    """Captured bodies contain full raw operator prompts; the file must be
+    owner-only (0600), never inherit the umask's world/group-readable bits."""
+    monkeypatch.setattr(R, "LOXO_CAPTURE_DIR", str(tmp_path / "caps"))
+    R._capture_request(b'{"model": "loxo/auto", "messages": []}')
+    files = list((tmp_path / "caps").glob("req-*.json"))
+    assert len(files) == 1
+    mode = stat.S_IMODE(os.stat(files[0]).st_mode)
+    assert mode == 0o600
 
 
 def test_capture_failure_never_raises(tmp_path, monkeypatch):

@@ -109,7 +109,8 @@ def _redact_paths_in_string(text: str) -> str:
 
 
 def _fill(n: int) -> str:
-    return FILLER[:max(n, 1)]
+    n = max(n, 1)
+    return (FILLER * (n // len(FILLER) + 1))[:n]
 
 
 def _sanitize_content(content):
@@ -154,7 +155,7 @@ def _scrub_system_content(content):
             if isinstance(part, dict) and part.get("type") == "text":
                 out.append({**part, "text": _scrub_operator_text(part.get("text", ""))})
             else:
-                out.append(part)
+                out.append(NON_TEXT_CONTENT_PLACEHOLDER)
         return out
     # Unrecognized shape (bare dict, int, ...): fail CLOSED rather than
     # passing unredacted content through into a committed fixture.

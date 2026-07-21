@@ -378,14 +378,29 @@ _capture_seq = itertools.count()
 
 
 def _capture_request(raw: bytes) -> None:
-    """Dump one raw request body to LOXO_CAPTURE_DIR; never break the request."""
+    """Dump one raw request body to LOXO_CAPTURE_DIR; never break the request.
+
+    Bodies contain full raw operator prompts, so the file must be owner-only
+    (0600) from the moment it exists — never briefly world-readable under the
+    umask. Written to a temp file with 0600 perms, then atomically renamed
+    into place.
+    """
     if not LOXO_CAPTURE_DIR:
         return
     try:
         d = pathlib.Path(LOXO_CAPTURE_DIR)
         d.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%f")
-        (d / f"req-{ts}-{next(_capture_seq):04d}.json").write_bytes(raw)
+        dest = d / f"req-{ts}-{next(_capture_seq):04d}.json"
+        tmp = d / f".{dest.name}.tmp-{os.getpid()}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        os.replace(tmp, dest)
     except Exception as e:  # noqa: BLE001 - capture must never break a request
         log(f"[router] capture failed ({e}); request unaffected")
 

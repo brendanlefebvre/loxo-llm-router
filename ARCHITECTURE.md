@@ -156,7 +156,7 @@ recorded as telemetry, not a decision input) into
 `main | chore | compaction | unknown` — first match wins, `unknown` is the
 default and deliberately visible; fingerprints are grounded in captured
 harness bodies, never guessed (`CLASSIFIER_VERSION` bumps on any rule
-change). One metadata-only JSONL entry per request lands in
+change). One metadata-only JSONL entry per completed request lands in
 `$LOXO_STATE_DIR/adequacy.jsonl` (`ledger.py`: `Observation`, `StreamScan`,
 `AdequacyLedger`): class, route, outcome signals (finish reason, tool-call
 JSON validity, token splits incl. cached/reasoning, latency, cost) — never

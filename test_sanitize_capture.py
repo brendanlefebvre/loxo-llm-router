@@ -12,6 +12,9 @@ argument redaction.
 import json
 
 from scripts.sanitize_capture import (
+    FILLER,
+    NON_TEXT_CONTENT_PLACEHOLDER,
+    _fill,
     _redact_home_paths,
     _sanitize_content,
     _scrub_system_content,
@@ -83,6 +86,38 @@ def test_indented_lowercase_instructions_marker_is_stripped():
     assert "private content" not in scrubbed
     assert "You are opencode, an interactive CLI tool." in scrubbed
     assert "[redacted operator instructions]" in scrubbed
+
+
+def test_fill_preserves_length_beyond_filler_size():
+    """A message longer than FILLER (~18000 chars) must get filler of the
+    SAME length, not truncated to len(FILLER) — the old `FILLER[:n]` slice
+    violated the same-length contract for long messages."""
+    n = len(FILLER) * 2 + 7
+    out = _fill(n)
+    assert len(out) == n
+    assert out.startswith("The quick brown fox")
+
+
+def test_system_content_list_with_non_text_part_fails_closed():
+    """A system/developer message whose content is a list containing a
+    non-text part (e.g. an image) must have that part replaced with the
+    placeholder, not copied through unchanged."""
+    body = {
+        "messages": [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "You are opencode, an interactive CLI tool."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                ],
+            }
+        ]
+    }
+    out = sanitize(body)
+    parts = out["messages"][0]["content"]
+    assert parts[0]["text"] == "You are opencode, an interactive CLI tool."
+    assert parts[1] == NON_TEXT_CONTENT_PLACEHOLDER
+    assert "base64" not in json.dumps(out)
 
 
 def test_tool_calls_arguments_become_sanitized_len():
