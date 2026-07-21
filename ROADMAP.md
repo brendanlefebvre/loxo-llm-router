@@ -30,7 +30,7 @@ Checkable, in priority order:
 
 The parity scorecard (Track B, below) keeps a standing section for gaps that are *structurally* unclosable — e.g. if the real cost baseline is subsidized subscription pricing that per-token routing mathematically cannot match, or harness-side prompt tuning that no router can compensate for. "We can say for sure why it's not possible" is a first-class deliverable of this roadmap, not a failure state.
 
-## Roadmap architecture: two tracks, three milestones
+## Roadmap architecture: two tracks, four milestones
 
 The roadmap runs two tracks in parallel. The **dial track** is the headline work: classification, adequacy measurement, shadow evaluation, and earned promotion — the machinery of local absorption, shipping observe-only from the first release because the dial's premise is evidence and evidence has lead time. The **parity track** is the floor work: closing the cloud-side capability gaps that keep the experience worth choosing (win condition 3) and the cost comparison honest (win condition 2). Every release advances both. (Track A is the dial because local absorption is win condition 1; Track B is parity, the floor.)
 
