@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "loxo-llm-router"
-version = "0.1.2"
+version = "0.2.0"
 description = "OpenAI-compatible router that dispatches each request to a local or cloud LLM backend by intent — not retry-on-failure."
 readme = "README.md"
 requires-python = ">=3.11"
