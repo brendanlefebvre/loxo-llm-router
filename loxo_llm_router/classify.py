@@ -4,12 +4,16 @@ Pure functions, no I/O. Ordered rules, first match wins; `unknown` is the
 default — an inflated unknown rate is the classifier-health metric and must
 stay visible rather than being laundered into `main`.
 
-Fingerprints are grounded in captured OpenCode request bodies (2026-07-19
-session), not guessed. OpenCode swaps its system prompt by target model
-family, so `main` needs both variants. No compaction/summarize request has
-been captured yet, so COMPACTION_FINGERPRINTS is empty and those requests
-fall to `unknown` until a capture grounds the entry (bump CLASSIFIER_VERSION
-when it does).
+Fingerprints are grounded in captured request bodies: the 2026-07-19
+OpenCode session, plus the 2026-07-20 OpenCode + Pi session. OpenCode swaps
+its system prompt by target model family, so `main` needs both variants.
+Coverage now spans OpenCode (build agent, both model-family variants,
+/compact) and Pi (main incl. developer-role delivery, compaction). Known
+uncaptured variants: OpenCode's Architect agent, and any Pi title/chore
+shapes — none observed, Pi appears not to do LLM-based titling.
+
+v2 = compaction + Pi fingerprints + developer-role support (bump
+CLASSIFIER_VERSION when new captures ground further entries).
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-CLASSIFIER_VERSION = 1
+CLASSIFIER_VERSION = 2
 
 TITLE_FINGERPRINTS = (
     "You are a title generator",
@@ -25,8 +29,15 @@ TITLE_FINGERPRINTS = (
 MAIN_FINGERPRINTS = (
     "You are opencode, an interactive CLI tool",
     "You are OpenCode, the best coding agent on the planet",
+    # Pi (captured 2026-07-20; 4-tool inventory)
+    "You are an expert coding assistant operating inside pi",
 )
-COMPACTION_FINGERPRINTS: tuple[str, ...] = ()
+COMPACTION_FINGERPRINTS = (
+    # OpenCode /compact (captures-2/0013, 2026-07-20)
+    "You are an anchored context summarization assistant",
+    # Pi compaction (captures-pi/0019+0020, 2026-07-20)
+    "You are a context summarization assistant",
+)
 
 
 @dataclass(frozen=True)
@@ -41,7 +52,7 @@ def _system_text(body: dict) -> str:
     if not isinstance(msgs, list):
         return ""
     for m in msgs:
-        if not (isinstance(m, dict) and m.get("role") == "system"):
+        if not (isinstance(m, dict) and m.get("role") in ("system", "developer")):
             continue
         content = m.get("content")
         if isinstance(content, str):

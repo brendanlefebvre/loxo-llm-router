@@ -137,3 +137,4 @@ Implementation lands in v0.3 ("Operator-ready"): that release exists to produce 
 - Central ledger collector transport (HTTP push to a small collector service vs. object storage) — decided in the v0.3 collector spec; the append-only invariants above keep both options open.
 - Idle-aware shadow scheduling.
 - Automatic promotion, revisited only after adequacy metrics have a track record a human has learned to trust.
+- Adequacy schema: add an error/disconnect marker field (exception-path Observations are currently unwritten) before the dial (v0.4) reads the ledger.

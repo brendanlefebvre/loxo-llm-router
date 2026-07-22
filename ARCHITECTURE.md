@@ -133,18 +133,52 @@ image part untouched and never breaks the request.
 - Every cloud-served response is scanned for OpenRouter's `usage.cost`:
   parsed from the JSON body (non-streaming) or teed out of the terminal SSE
   usage chunk (streaming) without delaying the client.
-- Costs accumulate in memory (total, per provider, per model) and append to
-  a JSONL ledger (`SPEND_LEDGER`, default `$LOXO_STATE_DIR/spend.jsonl`, where
-  the state root resolves `LOXO_STATE_DIR` > `$XDG_STATE_HOME/loxo-llm-router`
+- Costs accumulate in memory (total, per provider, per model, plus per-model
+  cached-token counts and estimated cache savings) and append to a JSONL
+  ledger (`SPEND_LEDGER`, default `$LOXO_STATE_DIR/spend.jsonl`, where the
+  state root resolves `LOXO_STATE_DIR` > `$XDG_STATE_HOME/loxo-llm-router`
   > `~/.local/state/loxo-llm-router`; a pre-existing legacy
   `~/.config/loxo-llm-router/spend.jsonl` keeps working, but only while it
   exists and the new path doesn't), which re-seeds the accumulator on
-  startup. Ledger writes are best-effort: a write failure never breaks a
-  response (the cost is still counted in memory).
+  startup. Ledger writes run in a worker thread off the event loop and are
+  best-effort: a write failure never breaks a response (the cost is still
+  counted in memory).
 - A **rate card** (per-Mtok pricing, context length, input modalities for
   every distinct `cloud_target`) is fetched from OpenRouter on a TTL
   (`RATE_CARD_TTL`, default 24h). Fetches are non-blocking and best-effort;
   endpoints serve the cached snapshot and never await the network.
+
+## Request classification and the adequacy ledger (v0.2)
+
+Every `/v1/chat/completions` request is classified from observable shape
+(`classify.py`: system-prompt fingerprints plus tool count; message count is
+recorded as telemetry, not a decision input) into
+`main | chore | compaction | unknown` — first match wins, `unknown` is the
+default and deliberately visible; fingerprints are grounded in captured
+harness bodies, never guessed (`CLASSIFIER_VERSION` bumps on any rule
+change). One metadata-only JSONL entry per completed request lands in
+`$LOXO_STATE_DIR/adequacy.jsonl` (`ledger.py`: `Observation`, `StreamScan`,
+`AdequacyLedger`): class, route, outcome signals (finish reason, tool-call
+JSON validity, token splits incl. cached/reasoning, latency, cost) — never
+message content. Observe-only in v0.2: no routing decision reads it.
+Exception paths (mid-stream disconnects, transport errors without fallback)
+currently write no entry; an error-marker schema addition is planned before
+the dial (v0.4) consumes this data.
+
+## Cloud-side parity: cache, reasoning, metadata (v0.2)
+
+Cloud-bound bodies get top-level `cache_control: {"type": "ephemeral"}`
+injected (`cache.py`, mechanism decided by the 2026-07 spike — see
+docs/spikes/2026-07-cache-affinity.md) when the live rate card says the
+target supports cache reads; client-supplied `cache_control` is never
+overridden. `/v1/spend` reports cached tokens and estimated savings per
+model. Tiers may set `reasoning = "low|medium|high"`, mapped to OpenRouter's
+`reasoning.effort`; a client-sent `reasoning` wins, and OpenAI-style
+`reasoning_effort` is translated rather than dropped. `/v1/models` derives
+tier `context_length` from the live rate card (explicit `advertised_context`
+overrides; local-pinned tiers advertise the local limit) and advertises the
+cloud target's per-token rates as a ceiling; local non-streaming responses
+report `usage.cost: 0` (local streaming deliberately not rewritten).
 
 ## HTTP surface
 

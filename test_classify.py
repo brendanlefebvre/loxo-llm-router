@@ -83,3 +83,51 @@ def test_classification_is_frozen():
     except Exception:
         raised = True
     assert raised
+
+
+# --- v2: compaction + Pi fingerprints + developer role (captured 2026-07-20) --
+
+def test_opencode_compaction_classified():
+    c = classify(_body(
+        system="You are an anchored context summarization assistant for coding sessions.",
+        tools=0, messages=11))
+    assert c.cls == "compaction"
+    assert c.version == 2
+
+
+def test_pi_compaction_classified():
+    c = classify(_body(
+        system="You are a context summarization assistant. Your task is to read a conversation.",
+        tools=0, messages=2))
+    assert c.cls == "compaction"
+
+
+def test_pi_main_classified():
+    c = classify(_body(
+        system="You are an expert coding assistant operating inside pi, a coding agent harness.",
+        tools=4))
+    assert c.cls == "main"
+
+
+def test_developer_role_system_prompt_is_read():
+    # Pi sends the system prompt under role "developer" on reasoning-model
+    # turns (captured 2026-07-20); the fingerprint must still be found.
+    body = {"model": "loxo/reason", "stream": True,
+            "tools": [{"x": 1}] * 4,
+            "messages": [
+                {"role": "developer",
+                 "content": "You are an expert coding assistant operating inside pi, etc."},
+                {"role": "user", "content": "hi"},
+            ]}
+    assert classify(body).cls == "main"
+
+
+def test_compaction_rule_order():
+    # Rule order: chore -> compaction -> main. Order is part of the contract.
+    c = classify(_body(system="You are an anchored context summarization assistant.", tools=0))
+    assert c.cls == "compaction"
+
+
+def test_version_bumped_everywhere():
+    assert CLASSIFIER_VERSION == 2
+    assert classify(_body(system=None)).version == 2
