@@ -153,7 +153,10 @@ def _scrub_system_content(content):
         out = []
         for part in content:
             if isinstance(part, dict) and part.get("type") == "text":
-                out.append({**part, "text": _scrub_operator_text(part.get("text", ""))})
+                # Emit a clean text part — never spread `**part`, which would
+                # preserve foreign keys (cache_control, metadata, ...) that
+                # could carry operator content into a committed fixture.
+                out.append({"type": "text", "text": _scrub_operator_text(part.get("text", ""))})
             else:
                 out.append(NON_TEXT_CONTENT_PLACEHOLDER)
         return out

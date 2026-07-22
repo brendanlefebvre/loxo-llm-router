@@ -120,6 +120,28 @@ def test_system_content_list_with_non_text_part_fails_closed():
     assert "base64" not in json.dumps(out)
 
 
+def test_system_text_part_drops_foreign_keys():
+    """A text part in a system/developer message must be emitted as a clean
+    {type, text} dict — foreign keys (cache_control, metadata, ...) must not
+    survive, since they could carry operator content into a fixture."""
+    body = {
+        "messages": [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "You are opencode.",
+                     "cache_control": {"ttl": "5m"}, "x_meta": "SECRET-PROJECT"},
+                ],
+            }
+        ]
+    }
+    out = sanitize(body)
+    part = out["messages"][0]["content"][0]
+    assert set(part.keys()) == {"type", "text"}
+    assert "SECRET-PROJECT" not in json.dumps(out)
+    assert "cache_control" not in json.dumps(out)
+
+
 def test_tool_calls_arguments_become_sanitized_len():
     body = {
         "messages": [
