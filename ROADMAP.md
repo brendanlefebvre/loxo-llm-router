@@ -8,7 +8,9 @@ Adopted 2026-07-15/16, against a v0.1.0 baseline. This document holds *intent* �
 
 Loxo becomes **the dial that tracks the local/frontier boundary as it moves.** Concretely: you point OpenCode, Pi, or Claude Code at Loxo with an OpenRouter key (and optionally a local server URL); local models absorb an evidence-earned, growing share of a real agentic workload; the cost lands at or below what the operator actually spends today; and the session stays good enough that choosing Loxo over the native stacks never feels like a sacrifice.
 
-**Where Loxo actually stands (v0.1.0):** an OpenAI-compatible proxy with heuristic tier routing, local→cloud transport fallback, a vision policy, a spend ledger, and a live rate card. No cache injection, no reasoning passthrough, no request classification, no adequacy measurement, no dial. The distance between that paragraph and this one is the roadmap.
+**Where Loxo stood when this roadmap was adopted (v0.1.0):** an OpenAI-compatible proxy with heuristic tier routing, local→cloud transport fallback, a vision policy, a spend ledger, and a live rate card. No cache injection, no reasoning passthrough, no request classification, no adequacy measurement, no dial. The distance between that paragraph and this one is the roadmap.
+
+That baseline is left as written — it is the fixed point the milestones are measured from, not a status line. For what has since landed, see [Milestones](#milestones): v0.2.0 closed the first four of those five gaps, leaving the dial itself.
 
 ## Win conditions
 
@@ -65,7 +67,7 @@ The roadmap runs two tracks in parallel. The **dial track** is the headline work
 
 ## Milestones
 
-- **v0.2 — "Honest cloud."** Feature scope fully merged (A1+A2 observing, B1 cache injection, B3 metadata honesty — plus B2 reasoning, pulled forward from the old v0.3). Remaining to tag: parity scorecard v1 (`docs/parity.md`), golden harness fixtures, and the acceptance check — a real OpenCode session on `loxo/*` populates the adequacy ledger with classified traffic, and shows cache hits in `/v1/spend` and correct context windows. No new features enter v0.2.
+- **v0.2 — "Honest cloud." Shipped** — tagged [v0.2.0](https://github.com/brendanlefebvre/loxo-llm-router/releases/tag/v0.2.0) 2026-07-21. Delivered: A1+A2 observing, B1 cache injection, B2 reasoning (pulled forward from the old v0.3), B3 metadata honesty, parity scorecard v1 ([`docs/parity.md`](docs/parity.md)), golden harness fixtures from OpenCode and Pi, and CI. The acceptance check passed 2026-07-20 — a real session on `loxo/*` populated the adequacy ledger with classified traffic and showed cache hits in `/v1/spend` and correct context windows.
 - **v0.3 — "Operator-ready."** The recruitment release: everything a potential test operator needs to get the point quickly, see a visible payoff, and start contributing evidence. Contents: the OpenTelemetry trace emitter (observe-only; spec: `docs/specs/otel-trace-emitter.md`), B5 `/v1/messages` translation layer, central ledger collector v1 deployed with opt-in ledger push (invariants in the implementation notes below; transport decided in the collector's own spec), a README/pitch rework leading with visible-payoff artifacts (trace-waterfall screenshot, real `/v1/spend` excerpt, scorecard link), and onboarding polish.
 
   **Harness checkpoint #1 — decided 2026-07-20** (taken early at a roadmap checkpoint; it was scheduled for this release because "if the answer is yes, later is more expensive than sooner"):
