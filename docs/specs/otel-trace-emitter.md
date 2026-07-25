@@ -96,7 +96,11 @@ emit it as the `loxo.session_id` root-span attribute. Resolution order, first hi
 
 1. an inbound `x-loxo-session-id` request header, if present;
 2. the OpenAI-compatible `user` field from the request body;
-3. a stable hash of the system-prompt prefix plus the requested model;
+3. a stable, stateless hash of the system-prompt prefix, the first user message, and the
+   requested model — the first user message distinguishes conversations that share a system
+   prompt (system-prompt-alone collides across all of a harness's sessions). Known residual:
+   byte-identical openers still merge; see the foundation design for why a timestamp was
+   rejected for this fallback;
 4. otherwise `None` — and the attribute is omitted entirely.
 
 **Observe-only, like everything else here:** the id must never influence routing, and an
