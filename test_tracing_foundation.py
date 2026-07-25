@@ -109,3 +109,20 @@ def test_handler_wires_session_id_from_user_field(monkeypatch):
     )
     assert resp.status_code == 200
     assert captured["obs"].session_id == "user-77"
+
+
+def test_headers_for_strips_loxo_control_headers():
+    """loxo control headers (x-loxo-*) are observe/route-only and must never
+    reach an upstream — they'd leak an internal correlation id to a third party."""
+    client_headers = {
+        "host": "router:9090",
+        "authorization": "Bearer client-token",
+        "content-type": "application/json",
+        "x-loxo-session-id": "sess-secret",
+        "x-loxo-quality": "best",
+        "x-loxo-vision": "cloud",
+    }
+    out = R._headers_for("http://localhost:8080", client_headers)
+    assert "content-type" in out  # ordinary headers pass through
+    assert not any(k.lower().startswith("x-loxo-") for k in out)
+    assert "authorization" not in {k.lower() for k in out}  # local target: no auth added

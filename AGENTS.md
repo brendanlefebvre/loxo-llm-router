@@ -27,7 +27,7 @@ and model based on the tier's `routing` policy.
 
 | Tier | routing | vision |
 |---|---|---|
-| `loxo/auto` | local-first, escalate on size/`x-quality: best` | shim |
+| `loxo/auto` | local-first, escalate on size/`x-loxo-quality: best` | shim |
 | `loxo/fast` | pinned cloud | reject images (422) |
 | `loxo/balanced` | pinned cloud | shim |
 | `loxo/reason` | pinned cloud | native |
@@ -41,14 +41,14 @@ Add/retarget tiers by editing the `[tiers.*]` table.
 
 0. `model` matches a tier id → resolve by its `routing` policy:
    `cloud` (pinned cloud target), `local` (pinned local, no cloud fallback), or
-   `auto` (`x-quality: best` or oversized prompt → `cloud_target`, else local).
+   `auto` (`x-loxo-quality: best` or oversized prompt → `cloud_target`, else local).
 1. `model` matches a `local_models` entry → local
-2. `x-quality: best` header → cloud
+2. `x-loxo-quality: best` header → cloud
 3. estimated prompt > `local_context_limit` tokens → cloud
 4. `model` contains `/` → cloud
 5. default → local
 
-Note: `x-quality: best` only affects the `auto` tier (rule 0 / rule 2). The
+Note: `x-loxo-quality: best` only affects the `auto` tier (rule 0 / rule 2). The
 pinned tiers (`fast`/`deep`/`local`) return before the header is read, so the
 header is a no-op on them — pick the tier directly (e.g. `loxo/deep`) instead.
 
@@ -64,7 +64,7 @@ of a blank HTTP 200.
 Disabled unless `VISION_SHIM_MODEL` (local OCR) or `VISION_CLOUD_MODEL`
 (multimodal cloud reroute) is set. When set, image content aimed at a
 text-only target is handled per a 3-mode policy (`VISION_MODE`:
-`auto`/`local`/`cloud`), per-request overridable via the `x-vision` header:
+`auto`/`local`/`cloud`), per-request overridable via the `x-loxo-vision` header:
 
 - `local` — OCR each image via a local VLM (`VISION_SHIM_URL`), feed the
   resulting text to the text-only model.

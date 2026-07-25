@@ -19,7 +19,7 @@ to the right backend and model. On the local side, that backend can be anything
 OpenAI-compatible: MLX, Ollama, llama.cpp, vLLM, LM Studio.
 
 > Today (v0.1.0) loxo routes by **declared intent** — the tier you pick, the
-> prompt size, an `x-quality` header. Teaching it to shift work onto local
+> prompt size, an `x-loxo-quality` header. Teaching it to shift work onto local
 > models by *measured* adequacy — the local/frontier "dial" — is the
 > [ROADMAP](ROADMAP.md).
 
@@ -87,7 +87,7 @@ resolves it to a real backend and model. The bundled tiers:
 
 | Tier | Routing | Vision |
 |---|---|---|
-| `loxo/auto` | local-first; escalate on size / `x-quality: best` | shim |
+| `loxo/auto` | local-first; escalate on size / `x-loxo-quality: best` | shim |
 | `loxo/fast` | pinned cloud | reject images (422) |
 | `loxo/balanced` | pinned cloud | shim |
 | `loxo/reason` | pinned cloud | native |

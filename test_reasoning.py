@@ -90,7 +90,7 @@ def test_fallback_body_gets_tier_reasoning(monkeypatch):
 
     body = {"model": "loxo/auto", "messages": [{"role": "user", "content": "hi"}]}
     asyncio.run(R.chat_completions(
-        _FakeChatRequest(body), x_quality=None, x_vision=None, authorization=None))
+        _FakeChatRequest(body), x_loxo_quality=None, x_loxo_vision=None, authorization=None))
 
     assert captured["fallback_body"] is not None, "expected a cloud fallback to be built"
     fb = json.loads(captured["fallback_body"])
