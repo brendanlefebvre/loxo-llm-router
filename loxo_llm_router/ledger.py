@@ -214,6 +214,7 @@ class Observation:
     tool_calls_valid_json: bool | None = None
     usage: dict[str, Any] | None = field(default=None, repr=False)
     usd: float = 0.0
+    session_id: str | None = None
 
     def to_entry(self) -> dict[str, Any]:
         u = self.usage or {}
@@ -242,6 +243,7 @@ class Observation:
                 "cached": ptd.get("cached_tokens"),
             },
             "usd": self.usd,
+            "session_id": self.session_id,
             "shadow": False,
         }
 

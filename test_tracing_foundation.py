@@ -30,3 +30,8 @@ def test_record_fans_out_to_adequacy(monkeypatch):
 
     asyncio.run(drive())
     assert seen == [o]
+
+
+def test_to_entry_includes_session_id():
+    assert _obs(session_id="sess-1").to_entry()["session_id"] == "sess-1"
+    assert _obs().to_entry()["session_id"] is None
