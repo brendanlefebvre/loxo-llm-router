@@ -84,3 +84,28 @@ def test_export_failure_never_raises():
             raise RuntimeError("exporter is on fire")
     em = tracing.TraceEmitter(tracer=BoomTracer())
     em.emit(_obs())  # must swallow the error, not propagate
+
+
+def test_fallback_emits_child_span():
+    em, exporter = _emitter_and_exporter()
+    em.emit(_obs(route="cloud", reason="fallback", fallback_fired=True,
+                 fallback_at_ms=100, latency_ms=800))
+    spans = exporter.get_finished_spans()
+    names = {s.name for s in spans}
+    assert names == {"loxo.chat_completion", "loxo.fallback"}
+    root = next(s for s in spans if s.name == "loxo.chat_completion")
+    child = next(s for s in spans if s.name == "loxo.fallback")
+    assert root.attributes["loxo.fallback_fired"] is True
+    # child is parented to root and nested within its window
+    assert child.parent is not None
+    assert child.parent.span_id == root.context.span_id
+    assert root.start_time <= child.start_time
+    assert child.end_time <= root.end_time
+    # child begins ~fallback_at_ms into the root's 800ms window
+    assert child.start_time - root.start_time == 100 * 1_000_000
+
+
+def test_no_fallback_child_when_not_fired():
+    em, exporter = _emitter_and_exporter()
+    em.emit(_obs(fallback_fired=False, fallback_at_ms=None))
+    assert {s.name for s in exporter.get_finished_spans()} == {"loxo.chat_completion"}

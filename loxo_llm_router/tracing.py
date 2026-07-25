@@ -95,6 +95,14 @@ class TraceEmitter:
             _set(span, "gen_ai.usage.output_tokens", usage.get("completion_tokens"))
             if obs.status is not None and obs.status != 200:
                 span.set_status(Status(StatusCode.ERROR))
+
+            if obs.fallback_fired and obs.fallback_at_ms is not None:
+                from opentelemetry.trace import set_span_in_context
+                fb_start = start_ns + int(obs.fallback_at_ms * 1_000_000)
+                ctx = set_span_in_context(span)
+                child = self._tracer.start_span(
+                    "loxo.fallback", context=ctx, start_time=fb_start)
+                child.end(end_time=end_ns)
         finally:
             span.end(end_time=end_ns)
 
