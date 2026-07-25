@@ -28,6 +28,12 @@ distributed-tracing waterfall*. Same `Observation`, two sinks.
 - No proprietary LangSmith SDK. We emit vendor-neutral OTLP; LangSmith is merely one
   possible `OTEL_EXPORTER_OTLP_ENDPOINT`.
 - No new hard dependency in the base install (see Config: lazy optional extra).
+- **An agent-readable session/trajectory sink.** Emitting the trace in a shape an agent can
+  read back — to review, resume, or replay its own trajectory — is a distinct audience with
+  distinct requirements from a human-facing tracing backend. Possibly a v0.4; explicitly out
+  of scope for v0.3. The emitter must ship and prove itself against a real backend first: a
+  sink designed for two consumers at once before it has served either satisfies neither
+  cleanly. It grows a second audience only after the first is real.
 
 ## The seam: reuse `Observation`
 
@@ -48,15 +54,23 @@ needs:
 | `usage` | `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` |
 | `usd` | `loxo.cost_usd` |
 | `fallback_fired` | `loxo.fallback_fired` |
+| `session_id` | `loxo.session_id` (omitted when `None`) |
 
 `obs` is already handed to `_spawn(ADEQUACY.write(obs))` at the three finalization sites
 in `forward()` (the non-200 error path, the streaming-success tail, and the
-non-streaming path), all fire-and-forget via `_spawn(...)`. **The trace emitter hooks the
-same lifecycle**: emit a span built from `obs` at the same points.
+non-streaming path), all fire-and-forget via `_spawn(...)`. Once those sites collapse into
+`record(obs)` (below), **the trace emitter hooks that single choke point**: emit a span
+built from `obs` alongside the adequacy write.
 
-Recommended refactor: introduce a single `record(obs)` choke point that fans out to both
-sinks (`ADEQUACY.write(obs)` + `TRACES.emit(obs)`), so the three call sites collapse to
-one and no future field-population site can forget a sink.
+**Required first step — collapse the finalization sites into `record(obs)`.** Before any
+tracing code is written, introduce a single `record(obs)` choke point in `forward()` that
+fans out to the sinks (`ADEQUACY.write(obs)` today, `+ TRACES.emit(obs)` once the emitter
+exists), collapsing the three finalization sites — the non-200 error path, the
+streaming-success tail, and the non-streaming path — into one. This is the first
+implementation task, not an optional cleanup: the emitter is the *second* sink, a third is
+plausible later, and every future sink wired at three separate call sites is one more
+chance to forget one. Added at a single choke point it is a one-line fan-out; added at
+three sites it is three chances to miss.
 
 ## Span shape (OTel GenAI semantic conventions)
 
@@ -73,6 +87,21 @@ Loxo-specific facts that have no semconv key get a `loxo.*` prefix.
   visibly shows the local-attempt → cloud-retry hop. This hop is the single
   highest-value thing to see, so it is in scope for v1 even though the other child is
   optional.
+
+### Session correlation — `loxo.session_id`
+
+Spans are per-request today with nothing threading them, so a conversation's requests
+cannot be grouped in a backend. Add a `session_id: str | None` field to `Observation` and
+emit it as the `loxo.session_id` root-span attribute. Resolution order, first hit wins:
+
+1. an inbound `x-loxo-session-id` request header, if present;
+2. the OpenAI-compatible `user` field from the request body;
+3. a stable hash of the system-prompt prefix plus the requested model;
+4. otherwise `None` — and the attribute is omitted entirely.
+
+**Observe-only, like everything else here:** the id must never influence routing, and an
+unresolvable id (case 4) is not an error. Threading it is cheap now and painful to
+retrofit once there are traces worth keeping.
 
 ## Config (opt-in, mirrors `SPEND_LEDGER` / `LOXO_CAPTURE_DIR`)
 
@@ -114,12 +143,17 @@ New `loxo_llm_router/tracing.py`, sibling to `ledger.py`: a `TraceEmitter` class
 ## Task breakdown (SDD)
 
 1. **Spec** — this document. *(done on this branch.)*
-2. `tracing.py` + config gating + `test_tracing.py` RED → GREEN, pure in-memory exporter.
-3. Wire the `record(obs)` choke point in `forward()` (collapse the three `obs`-write sites);
-   add the `loxo.upstream_call` + `loxo.fallback` child spans.
-4. `[otel]` extra in `pyproject.toml`; `docs/deploy.md` note + a Jaeger and a LangSmith
+2. **`record(obs)` choke point** — collapse the three finalization sites in `forward()`
+   (non-200 error path, streaming-success tail, non-streaming path) into a single
+   `record(obs)` that fans out to `ADEQUACY.write(obs)` alone for now. Pure refactor, no
+   behavior change; the existing adequacy tests stay green. Lands *before* any tracing code
+   so the emitter is added at one site, not three.
+3. `tracing.py` + config gating + `test_tracing.py` RED → GREEN, pure in-memory exporter.
+4. Add `TRACES.emit(obs)` to the `record(obs)` fan-out; add the `loxo.upstream_call` +
+   `loxo.fallback` child spans.
+5. `[otel]` extra in `pyproject.toml`; `docs/deploy.md` note + a Jaeger and a LangSmith
    `docker-compose`/env snippet for the demo.
-5. `/health` gains an `otel` block (`enabled`, `endpoint`), mirroring the existing
+6. `/health` gains an `otel` block (`enabled`, `endpoint`), mirroring the existing
    vision / spend blocks.
 
 ## Acceptance
