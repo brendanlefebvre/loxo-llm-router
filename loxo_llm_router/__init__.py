@@ -364,6 +364,17 @@ SPEND = SpendTracker(resolve_spend_ledger(log), log=log)
 ADEQUACY = AdequacyLedger(resolve_adequacy_ledger(), log=log)
 
 
+def record(obs: Observation) -> None:
+    """Single finalization choke point: fan a completed obs out to every sink.
+
+    Synchronous — only schedules fire-and-forget work, so it is safe from the
+    streaming error path, the streamer() generator, and the non-streaming path.
+    Plan B (OTel) adds the second sink at THIS one site, not three.
+    """
+    _spawn(ADEQUACY.write(obs))
+    # Plan B: _spawn(TRACES.emit(obs))  — the emitter hooks here.
+
+
 def auth_failed(authorization: str | None) -> Response | None:
     """If ROUTER_TOKEN is set, require a matching bearer token. Returns a 401
     Response on failure, or None to proceed. Constant-time compare."""
@@ -793,7 +804,7 @@ async def forward(
             if obs is not None:
                 obs.status = resp.status_code
                 obs.latency_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
-                _spawn(ADEQUACY.write(obs))
+                record(obs)
             return JSONResponse(status_code=resp.status_code, content=content)
 
         async def streamer():
@@ -825,7 +836,7 @@ async def forward(
                     obs.usage = scan.usage
                     obs.usd = float(cost_found) if (served_cloud_model and cost_found) else 0.0
                     obs.latency_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
-                    _spawn(ADEQUACY.write(obs))
+                    record(obs)
             finally:
                 await resp.aclose()
                 await client.aclose()
@@ -885,7 +896,7 @@ async def forward(
             obs.usd = cost_val
             obs.latency_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
             obs.ttfb_ms = obs.latency_ms  # non-streaming: single read
-            _spawn(ADEQUACY.write(obs))
+            record(obs)
 
         content = resp.content
         served_local = (obs.route == "local" and not obs.fallback_fired) if obs is not None \
