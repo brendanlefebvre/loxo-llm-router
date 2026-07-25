@@ -113,6 +113,7 @@ from .classify import classify
 from .config import Config, VirtualModel, load_config
 from .ledger import (AdequacyLedger, Observation, SpendTracker, StreamScan,
                      resolve_adequacy_ledger, resolve_spend_ledger)
+from .tracing import TraceEmitter, resolve_otel_config
 
 
 def _ts() -> str:
@@ -370,6 +371,9 @@ SPEND = SpendTracker(resolve_spend_ledger(log), log=log)
 # A2: adequacy ledger (observe-only) — the dial's only evidence source.
 ADEQUACY = AdequacyLedger(resolve_adequacy_ledger(), log=log)
 
+_OTEL_CFG = resolve_otel_config()
+TRACES = TraceEmitter.from_config(_OTEL_CFG, log=log)
+
 # Opt-in raw request capture, for grounding classifier fingerprints and the
 # golden harness fixtures. Bodies contain full message content — never enable
 # in shared environments; captures stay on the operator's machines until
@@ -414,7 +418,7 @@ def record(obs: Observation) -> None:
     Plan B (OTel) adds the second sink at THIS one site, not three.
     """
     _spawn(ADEQUACY.write(obs))
-    # Plan B: _spawn(TRACES.emit(obs))  — the emitter hooks here.
+    TRACES.emit(obs)  # observe-only; no-op unless OTel is configured
 
 
 def auth_failed(authorization: str | None) -> Response | None:
