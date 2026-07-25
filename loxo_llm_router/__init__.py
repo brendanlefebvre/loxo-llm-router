@@ -905,6 +905,11 @@ async def forward(
                 raise
             fb_model = fallback_cloud_model or CLOUD_DEFAULT_MODEL
             log(f"[router] {primary_url} unreachable, falling back to cloud/{fb_model}")
+            # Mark the pivot BEFORE the retry: the child span is meant to cover
+            # the cloud attempt, so this must be when the retry began, not when
+            # it finished (that would collapse the span to a tail sliver).
+            if obs is not None:
+                obs.fallback_at_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
             resp = await client.post(
                 f"{fallback_url}{path}", content=fallback_body,
                 headers=_headers_for(fallback_url, client_headers),
@@ -912,8 +917,6 @@ async def forward(
             served_cloud_model = fb_model
             served_cloud_provider = _provider_host(CLOUD_BASE_URL)
             served_reason = "fallback"
-            if obs is not None:
-                obs.fallback_at_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
 
         cost_val = 0.0
         scan: StreamScan | None = None
@@ -1228,7 +1231,7 @@ async def health():
         "spend": spend_summary,
         "otel": {
             "enabled": TRACES.enabled,
-            "endpoint": os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or None,
+            "endpoint": (_OTEL_CFG or {}).get("endpoint"),
             "service_name": (_OTEL_CFG or {}).get("service_name"),
         },
     }

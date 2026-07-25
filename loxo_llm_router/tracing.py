@@ -1,8 +1,10 @@
 """OpenTelemetry trace emitter (observe-only, Plan B).
 
 Emits one root span per finalized request, built retroactively from the
-Observation at the record() choke point. Never runs on the live request path,
-so it cannot affect routing or the bytes sent. OpenTelemetry is a lazy optional
+Observation at the record() choke point — i.e. only after the response is
+finalized, so it cannot affect routing or the bytes sent. Handoff to the
+BatchSpanProcessor queue is non-blocking; export happens on its own thread.
+OpenTelemetry is a lazy optional
 dependency (the [otel] extra); absent or unconfigured, this is a no-op.
 
 Attribute names follow the OTel GenAI semantic conventions (gen_ai.*); loxo
@@ -27,14 +29,17 @@ def resolve_otel_config() -> dict[str, Any] | None:
     Enabled iff OTEL_EXPORTER_OTLP_ENDPOINT is set non-empty, or LOXO_OTEL_ENABLED
     is truthy. The exporter reads endpoint/headers from the standard OTEL_* env
     (so OTEL_EXPORTER_OTLP_HEADERS carries e.g. LangSmith auth for free); this
-    only decides on/off and the service name.
+    only decides on/off and the service name. The endpoint is captured here so
+    /health can report the value actually in force, not a later env edit that
+    has not been picked up (config resolves once, at import).
     """
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
     enabled = os.environ.get("LOXO_OTEL_ENABLED", "").strip().lower() in _TRUTHY
     if not endpoint and not enabled:
         return None
     return {"service_name": os.environ.get("OTEL_SERVICE_NAME", "loxo-llm-router").strip()
-            or "loxo-llm-router"}
+            or "loxo-llm-router",
+            "endpoint": endpoint or None}
 
 
 class TraceEmitter:

@@ -100,9 +100,10 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 export OTEL_SERVICE_NAME=loxo-llm-router          # optional; this is the default
 ```
 
-`GET /health` shows the live status under `"otel"` (`enabled`, `endpoint`,
-`service_name`). Unset the endpoint (and `LOXO_OTEL_ENABLED`) for zero spans and
-zero overhead.
+`GET /health` reports the tracing config in force under `"otel"` (`enabled`,
+`endpoint`, `service_name`). That config resolves once at startup, so an env
+edit needs a restart before `/health` — or the exporter — reflects it. Unset the
+endpoint (and `LOXO_OTEL_ENABLED`) for zero spans and zero overhead.
 
 ### Local Jaeger (all-in-one)
 

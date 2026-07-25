@@ -8,6 +8,9 @@ import loxo_llm_router as R
 from loxo_llm_router import ledger
 
 
+_CLOUD_MS = 60  # simulated cloud-retry latency; long enough to place the pivot
+
+
 class _Resp:
     def __init__(self, status=200, content=b'{"choices":[]}'):
         self.status_code = status
@@ -27,6 +30,7 @@ def test_nonstreaming_fallback_sets_fallback_at_ms(monkeypatch):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise httpx.ConnectError("local down")
+            await asyncio.sleep(_CLOUD_MS / 1000)  # the cloud retry takes real time
             return _Resp()
 
     monkeypatch.setattr(R.httpx, "AsyncClient", FakeClient)
@@ -46,3 +50,8 @@ def test_nonstreaming_fallback_sets_fallback_at_ms(monkeypatch):
     assert obs.fallback_fired is True
     assert obs.fallback_at_ms is not None
     assert obs.fallback_at_ms >= 0
+    # The marker is the PIVOT, not the finish: it must land before the cloud
+    # retry's duration, else the fallback child span degenerates into a sliver
+    # at the tail of the root instead of covering the retry.
+    assert obs.latency_ms >= _CLOUD_MS
+    assert obs.fallback_at_ms < _CLOUD_MS / 2
