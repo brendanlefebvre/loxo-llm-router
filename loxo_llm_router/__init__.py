@@ -91,6 +91,7 @@ Clients point any OpenAI-compatible SDK at http://<router-host>:9090/v1 .
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import os
@@ -908,6 +909,52 @@ async def forward(
             status_code=resp.status_code,
             media_type=resp.headers.get("content-type", "application/json"),
         )
+
+
+def _first_message_text(messages: list, role: str) -> str:
+    """Text of the first message with `role`. Content may be a string or a list
+    of parts; joins the {"type":"text"} parts. Returns "" if absent or odd-shaped."""
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") != role:
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        return ""
+    return ""
+
+
+def resolve_session_id(
+    session_header: str | None, body: dict, requested_model: str
+) -> str | None:
+    """Resolve an observe-only session id. Never raises (odd shapes -> None).
+
+    Order, first hit wins:
+      1. x-loxo-session-id header (explicit, client-supplied)
+      2. OpenAI-compatible `user` field (explicit, client-supplied)
+      3. stateless fingerprint: system prefix + first user message + model
+      4. None (no content to fingerprint)
+    """
+    try:
+        if isinstance(session_header, str) and session_header.strip():
+            return session_header
+        user = body.get("user")
+        if isinstance(user, str) and user.strip():
+            return user
+        messages = body.get("messages") or []
+        sys_text = _first_message_text(messages, "system")[:512]
+        usr_text = _first_message_text(messages, "user")[:512]
+        if not (sys_text or usr_text):
+            return None
+        raw = f"{sys_text}\x00{usr_text}\x00{requested_model}".encode("utf-8")
+        return "sys-" + hashlib.sha256(raw).hexdigest()[:16]
+    except Exception:  # noqa: BLE001 - observe-only: resolution must never break a request
+        return None
 
 
 @app.post("/v1/chat/completions")

@@ -35,3 +35,39 @@ def test_record_fans_out_to_adequacy(monkeypatch):
 def test_to_entry_includes_session_id():
     assert _obs(session_id="sess-1").to_entry()["session_id"] == "sess-1"
     assert _obs().to_entry()["session_id"] is None
+
+
+def test_resolve_prefers_header():
+    body = {"user": "u", "messages": [{"role": "user", "content": "hi"}]}
+    assert R.resolve_session_id("hdr-1", body, "loxo/auto") == "hdr-1"
+
+
+def test_resolve_falls_back_to_user_field():
+    body = {"user": "user-42", "messages": [{"role": "user", "content": "hi"}]}
+    assert R.resolve_session_id(None, body, "loxo/auto") == "user-42"
+    assert R.resolve_session_id("", body, "loxo/auto") == "user-42"  # empty header ignored
+
+
+def test_resolve_fingerprint_stable_and_sensitive():
+    body = {"messages": [{"role": "system", "content": "SYS"},
+                         {"role": "user", "content": "OPEN"}]}
+    a = R.resolve_session_id(None, body, "loxo/auto")
+    assert a == R.resolve_session_id(None, body, "loxo/auto")  # stable
+    assert a.startswith("sys-")
+    assert R.resolve_session_id(None, body, "loxo/other") != a  # model changes id
+    body2 = {"messages": [{"role": "system", "content": "SYS"},
+                          {"role": "user", "content": "DIFFERENT"}]}
+    assert R.resolve_session_id(None, body2, "loxo/auto") != a  # first user msg changes id
+
+
+def test_resolve_none_when_no_content():
+    assert R.resolve_session_id(None, {}, "loxo/auto") is None
+    assert R.resolve_session_id(None, {"messages": []}, "loxo/auto") is None
+
+
+def test_resolve_never_raises_on_odd_shapes():
+    body = {"user": 123,  # non-str user is ignored, not an error
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                         {"role": "system"}]}  # system msg with no content
+    out = R.resolve_session_id(None, body, "loxo/auto")
+    assert out.startswith("sys-")  # fingerprint over the user text "hi"
