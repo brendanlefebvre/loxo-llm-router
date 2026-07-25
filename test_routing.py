@@ -54,7 +54,7 @@ def test_rule1_explicit_local_model_routes_local():
 
 
 def test_rule1_beats_quality_best():
-    # A local model id wins even with x-quality: best (rule 1 precedes rule 2).
+    # A local model id wins even with x-loxo-quality: best (rule 1 precedes rule 2).
     base, _, reason = R.pick_target(_body(model="qwen3-30b"), "best")
     assert base == R.LOCAL_BASE_URL
     assert reason == "explicit-local-model"
@@ -356,7 +356,7 @@ def test_chat_completions_triggers_rate_card_snapshot_and_injects_cache(monkeypa
 
     body = {"model": "some-model", "messages": [{"role": "user", "content": "hi"}]}
     req = _FakeChatRequest(body)
-    asyncio.run(R.chat_completions(req, x_quality="best", x_vision=None, authorization=None))
+    asyncio.run(R.chat_completions(req, x_loxo_quality="best", x_loxo_vision=None, authorization=None))
 
     assert snapshot_calls, "chat_completions must call _rate_cards_snapshot_and_maybe_refresh"
     sent = json.loads(captured["primary_body"])
@@ -403,7 +403,7 @@ def test_pinned_cloud_tier_always_cloud(monkeypatch):
 def test_pinned_local_tier_always_local(monkeypatch):
     monkeypatch.setitem(R.VIRTUAL_MODELS, "loxo/local", R.VirtualModel(
         id="loxo/local", cloud_target=None, routing="local", vision="local"))
-    # even with x-quality: best and a huge prompt, it stays local
+    # even with x-loxo-quality: best and a huge prompt, it stays local
     monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 1)
     base, model, reason = R.pick_target(_body(model="loxo/local", text="x" * 1000), "best")
     assert base == R.LOCAL_BASE_URL

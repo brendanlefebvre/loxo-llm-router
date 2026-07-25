@@ -77,10 +77,10 @@ or `ROUTER_NS`). A tier declares:
 For each `/v1/chat/completions` request:
 
 1. `model` matches a tier id → that tier's policy. For `auto` tiers:
-   `x-quality: best` header → cloud; estimated prompt tokens >
+   `x-loxo-quality: best` header → cloud; estimated prompt tokens >
    `local_context_limit` → cloud; else local.
 2. `model` matches a `local_models` entry → local (explicit local intent)
-3. `x-quality: best` → cloud
+3. `x-loxo-quality: best` → cloud
 4. estimated prompt > `local_context_limit` → cloud (the estimate counts
    tool/function schemas too — agentic clients send large tool definitions)
 5. `model` contains `/` → cloud (provider-prefixed ids are OpenRouter's
@@ -121,7 +121,7 @@ setting:
   screenshots. Mode `auto` (default) escalates to a multimodal cloud model
   (`VISION_CLOUD_MODEL`) when the transcription is too thin to be useful
   (`VISION_OCR_MIN_CHARS`); `local`/`cloud` modes force one side.
-  Per-request override: `x-vision` header.
+  Per-request override: `x-loxo-vision` header.
 - `local` — on-machine OCR only; refuses (422) rather than escalate,
   because escalating would break the tier's local pin
 

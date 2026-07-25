@@ -8,7 +8,7 @@ Heuristics, in priority order (first match wins):
   1. If the request's `model` field matches a known LOCAL_MODELS entry,
      route to LOCAL.  (Explicit local intent.)
 
-  2. If the client sends `x-quality: best` header, route to CLOUD.
+  2. If the client sends `x-loxo-quality: best` header, route to CLOUD.
      (Explicit quality intent.)
 
   3. If the estimated prompt size exceeds LOCAL_CONTEXT_LIMIT tokens,
@@ -62,7 +62,7 @@ Configuration (env vars):
   VISION_MODE            default vision policy for image+text-only-model requests:
                          "auto" (OCR locally, escalate to cloud if OCR is thin),
                          "local" (OCR only), or "cloud" (always reroute to cloud).
-                         Overridden per-request by the `x-vision` header.
+                         Overridden per-request by the `x-loxo-vision` header.
   VISION_CLOUD_MODEL     multimodal cloud model to reroute image requests to in
                          cloud/auto-escalation modes (e.g. anthropic/claude-...).
   VISION_OCR_MIN_CHARS   auto-mode threshold; OCR shorter than this escalates.
@@ -95,6 +95,7 @@ Clients point any OpenAI-compatible SDK at http://<router-host>:9090/v1 .
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import itertools
 import json
@@ -311,7 +312,7 @@ VISION_SHIM_PROMPT = os.environ.get(
 
 # Vision routing policy (applied when an image hits a text-only target model):
 #   VISION_MODE          default policy: "auto" | "local" | "cloud".
-#                        Per-request `x-vision` header overrides it.
+#                        Per-request `x-loxo-vision` header overrides it.
 #                          local = OCR the image locally, feed text to the text model
 #                          cloud = reroute the whole request to a multimodal cloud model
 #                          auto  = OCR locally; if the transcription is thin (likely a
@@ -403,6 +404,17 @@ def _capture_request(raw: bytes) -> None:
         os.replace(tmp, dest)
     except Exception as e:  # noqa: BLE001 - capture must never break a request
         log(f"[router] capture failed ({e}); request unaffected")
+
+
+def record(obs: Observation) -> None:
+    """Single finalization choke point: fan a completed obs out to every sink.
+
+    Synchronous — only schedules fire-and-forget work, so it is safe from the
+    streaming error path, the streamer() generator, and the non-streaming path.
+    Plan B (OTel) adds the second sink at THIS one site, not three.
+    """
+    _spawn(ADEQUACY.write(obs))
+    # Plan B: _spawn(TRACES.emit(obs))  — the emitter hooks here.
 
 
 def auth_failed(authorization: str | None) -> Response | None:
@@ -561,13 +573,13 @@ async def apply_vision_policy(
     base_url: str,
     model_to_send: str,
     reason: str,
-    x_vision: str | None,
+    x_loxo_vision: str | None,
     vision_policy: str = "shim",
 ) -> tuple[str, str, dict[str, Any], str]:
     """Handle image content per the tier's vision policy.
 
       native - target sees images itself; pass through untouched
-      shim   - local OCR, may escalate to cloud if thin (VISION_MODE / x-vision)
+      shim   - local OCR, may escalate to cloud if thin (VISION_MODE / x-loxo-vision)
       local  - on-machine OCR only; raise VisionRejected if thin or no shim;
                never escalates to cloud (would break the local pin)
       reject - any image content -> raise VisionRejected
@@ -608,7 +620,7 @@ async def apply_vision_policy(
     if not (VISION_SHIM_MODEL or VISION_CLOUD_MODEL):
         return base_url, model_to_send, body, reason
 
-    mode = (x_vision or VISION_MODE or "auto").strip().lower()
+    mode = (x_loxo_vision or VISION_MODE or "auto").strip().lower()
     if mode not in {"local", "cloud", "auto"}:
         mode = "auto"
 
@@ -738,6 +750,7 @@ def _headers_for(url: str, client_headers: dict[str, str]) -> dict[str, str]:
     h = {
         k: v for k, v in client_headers.items()
         if k.lower() not in {"host", "authorization", "content-length", "accept-encoding"}
+        and not k.lower().startswith("x-loxo-")  # loxo control headers are observe/route-only, never forwarded
     }
     if url == CLOUD_BASE_URL and OPENROUTER_API_KEY:
         h["Authorization"] = f"Bearer {OPENROUTER_API_KEY}"
@@ -834,7 +847,7 @@ async def forward(
             if obs is not None:
                 obs.status = resp.status_code
                 obs.latency_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
-                _spawn(ADEQUACY.write(obs))
+                record(obs)
             return JSONResponse(status_code=resp.status_code, content=content)
 
         async def streamer():
@@ -866,7 +879,7 @@ async def forward(
                     obs.usage = scan.usage
                     obs.usd = float(cost_found) if (served_cloud_model and cost_found) else 0.0
                     obs.latency_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
-                    _spawn(ADEQUACY.write(obs))
+                    record(obs)
             finally:
                 await resp.aclose()
                 await client.aclose()
@@ -926,7 +939,7 @@ async def forward(
             obs.usd = cost_val
             obs.latency_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
             obs.ttfb_ms = obs.latency_ms  # non-streaming: single read
-            _spawn(ADEQUACY.write(obs))
+            record(obs)
 
         content = resp.content
         served_local = (obs.route == "local" and not obs.fallback_fired) if obs is not None \
@@ -940,11 +953,58 @@ async def forward(
         )
 
 
+def _first_message_text(messages: list, role: str) -> str:
+    """Text of the first message with `role`. Content may be a string or a list
+    of parts; joins the {"type":"text"} parts. Returns "" if absent or odd-shaped."""
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") != role:
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        return ""
+    return ""
+
+
+def resolve_session_id(
+    session_header: str | None, body: dict, requested_model: str
+) -> str | None:
+    """Resolve an observe-only session id. Never raises (odd shapes -> None).
+
+    Order, first hit wins:
+      1. x-loxo-session-id header (explicit, client-supplied)
+      2. OpenAI-compatible `user` field (explicit, client-supplied)
+      3. stateless fingerprint: system prefix + first user message + model
+      4. None (no content to fingerprint)
+    """
+    try:
+        if isinstance(session_header, str) and session_header.strip():
+            return session_header
+        user = body.get("user")
+        if isinstance(user, str) and user.strip():
+            return user
+        messages = body.get("messages") or []
+        sys_text = _first_message_text(messages, "system")[:512]
+        usr_text = _first_message_text(messages, "user")[:512]
+        if not (sys_text or usr_text):
+            return None
+        raw = f"{sys_text}\x00{usr_text}\x00{requested_model}".encode("utf-8")
+        return "sys-" + hashlib.sha256(raw).hexdigest()[:16]
+    except Exception:  # noqa: BLE001 - observe-only: resolution must never break a request
+        return None
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: Request,
-    x_quality: str | None = Header(default=None),
-    x_vision: str | None = Header(default=None),
+    x_loxo_quality: str | None = Header(default=None),
+    x_loxo_vision: str | None = Header(default=None),
+    x_loxo_session_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ):
     denied = auth_failed(authorization)
@@ -956,11 +1016,12 @@ async def chat_completions(
     body = json.loads(body_bytes)
     requested_model = body.get("model", "")
     stream = bool(body.get("stream", False))
+    session_id = resolve_session_id(x_loxo_session_id, body, requested_model)
 
     klass = classify(body)  # A1: observe-only, before any body rewrite
 
     requested_vm = resolve_virtual(body.get("model", ""))
-    base_url, model_to_send, reason = pick_target(body, x_quality)
+    base_url, model_to_send, reason = pick_target(body, x_loxo_quality)
     body["model"] = model_to_send
 
     # Vision policy: when an image hits a text-only target model, handle it per
@@ -968,7 +1029,7 @@ async def chat_completions(
     # No-op unless configured; see apply_vision_policy.
     try:
         base_url, model_to_send, body, reason = await apply_vision_policy(
-            body, base_url, model_to_send, reason, x_vision,
+            body, base_url, model_to_send, reason, x_loxo_vision,
             vision_policy=(requested_vm.vision if requested_vm else "shim"),
         )
     except VisionRejected as e:
@@ -1043,6 +1104,7 @@ async def chat_completions(
         requested_model=requested_model,
         route="cloud" if is_cloud else "local",
         served_model=model_to_send, reason=reason, stream=stream,
+        session_id=session_id,
     )
 
     return await forward(

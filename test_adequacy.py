@@ -28,7 +28,7 @@ def test_entry_has_exact_spec_schema():
     assert set(e) == {"ts", "class", "classifier_version", "requested_model", "route",
                       "served_model", "reason", "stream", "status", "latency_ms",
                       "ttfb_ms", "fallback_fired", "finish_reason", "had_tool_calls",
-                      "tool_calls_valid_json", "tokens", "usd", "shadow"}
+                      "tool_calls_valid_json", "tokens", "usd", "session_id", "shadow"}
     assert e["class"] == "main"
     assert e["shadow"] is False
     assert e["tokens"] == {"prompt": 100, "completion": 20, "reasoning": 5, "cached": 80}
