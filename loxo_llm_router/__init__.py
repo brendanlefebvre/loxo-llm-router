@@ -814,6 +814,8 @@ async def forward(
                     served_cloud_model = fb_model
                     served_cloud_provider = _provider_host(CLOUD_BASE_URL)
                     served_reason = "fallback"
+                    if obs is not None:
+                        obs.fallback_at_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
                     can_fallback = False
                     continue
                 await client.aclose()
@@ -906,6 +908,8 @@ async def forward(
             served_cloud_model = fb_model
             served_cloud_provider = _provider_host(CLOUD_BASE_URL)
             served_reason = "fallback"
+            if obs is not None:
+                obs.fallback_at_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
 
         cost_val = 0.0
         scan: StreamScan | None = None
