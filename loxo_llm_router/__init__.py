@@ -962,6 +962,7 @@ async def chat_completions(
     request: Request,
     x_quality: str | None = Header(default=None),
     x_vision: str | None = Header(default=None),
+    x_loxo_session_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ):
     denied = auth_failed(authorization)
@@ -972,6 +973,7 @@ async def chat_completions(
     body = json.loads(body_bytes)
     requested_model = body.get("model", "")
     stream = bool(body.get("stream", False))
+    session_id = resolve_session_id(x_loxo_session_id, body, requested_model)
 
     klass = classify(body)  # A1: observe-only, before any body rewrite
 
@@ -1059,6 +1061,7 @@ async def chat_completions(
         requested_model=requested_model,
         route="cloud" if is_cloud else "local",
         served_model=model_to_send, reason=reason, stream=stream,
+        session_id=session_id,
     )
 
     return await forward(

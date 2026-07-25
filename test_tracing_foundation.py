@@ -71,3 +71,41 @@ def test_resolve_never_raises_on_odd_shapes():
                          {"role": "system"}]}  # system msg with no content
     out = R.resolve_session_id(None, body, "loxo/auto")
     assert out.startswith("sys-")  # fingerprint over the user text "hi"
+
+
+from fastapi.testclient import TestClient
+from starlette.responses import JSONResponse
+
+
+def _wire_client(monkeypatch):
+    """A TestClient whose forward() is stubbed to capture the Observation."""
+    captured = {}
+
+    async def fake_forward(*args, **kwargs):
+        captured["obs"] = kwargs.get("obs")
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(R, "forward", fake_forward)
+    return TestClient(R.app), captured
+
+
+def test_handler_wires_session_id_from_header(monkeypatch):
+    client, captured = _wire_client(monkeypatch)
+    resp = client.post(
+        "/v1/chat/completions",
+        headers={"x-loxo-session-id": "sess-abc"},
+        json={"model": "loxo/auto", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+    assert captured["obs"].session_id == "sess-abc"
+
+
+def test_handler_wires_session_id_from_user_field(monkeypatch):
+    client, captured = _wire_client(monkeypatch)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "loxo/auto", "user": "user-77",
+              "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+    assert captured["obs"].session_id == "user-77"
