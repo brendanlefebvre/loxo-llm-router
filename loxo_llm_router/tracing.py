@@ -71,6 +71,8 @@ class TraceEmitter:
     def _emit(self, obs: "Observation") -> None:
         from opentelemetry.trace import Status, StatusCode
 
+        # Wall-clock end; latency_ms was monotonic in forward(). Sub-ms drift,
+        # acceptable for retroactive span timing (child uses the same arithmetic).
         end_ns = time.time_ns()
         dur_ns = int((obs.latency_ms or 0) * 1_000_000)
         start_ns = end_ns - dur_ns
