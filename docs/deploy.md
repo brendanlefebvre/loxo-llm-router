@@ -80,3 +80,57 @@ To inject the `OPENROUTER_API_KEY` secret, add it directly in the `EnvironmentVa
 ```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.loxo.llm-router.plist
 ```
+
+## OpenTelemetry tracing (optional)
+
+Loxo can emit one OTLP trace per request — route, reason, tokens, cost, latency,
+and the local→cloud fallback hop as a child span. It is **off by default** and
+strictly observe-only: enabling it never changes routing or the response.
+
+Install the extra:
+
+```bash
+pip install 'loxo-llm-router[otel]'
+```
+
+Enable by pointing at any OTLP/HTTP endpoint (standard OpenTelemetry env vars):
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export OTEL_SERVICE_NAME=loxo-llm-router          # optional; this is the default
+```
+
+`GET /health` shows the live status under `"otel"` (`enabled`, `endpoint`,
+`service_name`). Unset the endpoint (and `LOXO_OTEL_ENABLED`) for zero spans and
+zero overhead.
+
+### Local Jaeger (all-in-one)
+
+```yaml
+# docker-compose.yml
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"   # UI
+      - "4318:4318"     # OTLP/HTTP
+```
+
+```bash
+docker compose up -d
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+# run loxo, send a request, then open http://localhost:16686
+```
+
+### LangSmith (OTLP ingest)
+
+LangSmith ingests OTLP directly — no proprietary SDK. Auth rides in via the
+standard headers env var:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://api.smith.langchain.com/otel
+export OTEL_EXPORTER_OTLP_HEADERS="x-api-key=<LANGSMITH_API_KEY>"
+```
+
+> Verify LangSmith's current OTLP endpoint path and header name against their
+> live docs before relying on this — both have changed historically.

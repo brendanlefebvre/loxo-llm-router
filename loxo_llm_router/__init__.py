@@ -1226,6 +1226,11 @@ async def health():
         },
         "rate_cards": _tier_rate_cards(cards),
         "spend": spend_summary,
+        "otel": {
+            "enabled": TRACES.enabled,
+            "endpoint": os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or None,
+            "service_name": (_OTEL_CFG or {}).get("service_name"),
+        },
     }
 
 
