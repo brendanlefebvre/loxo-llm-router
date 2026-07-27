@@ -363,6 +363,63 @@ def test_chat_completions_triggers_rate_card_snapshot_and_injects_cache(monkeypa
     assert sent["cache_control"] == {"type": "ephemeral"}
 
 
+def test_local_streaming_body_carries_include_usage(monkeypatch):
+    """stream_options.include_usage is injected unconditionally, local included.
+    Without it a local streaming response has no final usage chunk, so the A2
+    adequacy ledger records null tokens for every local request. mlx-lm 0.31.3
+    returns the usage chunk correctly (verified 2026-07-27 against :7979)."""
+    captured = {}
+
+    async def fake_forward(base_url, path, primary_body, headers, stream, **kw):
+        captured["base_url"] = base_url
+        captured["primary_body"] = primary_body
+        return R.JSONResponse(content={"ok": True})
+    monkeypatch.setattr(R, "forward", fake_forward)
+
+    body = {"model": "qwen3", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+    req = _FakeChatRequest(body)
+    asyncio.run(R.chat_completions(req, x_loxo_quality=None, x_loxo_vision=None, authorization=None))
+
+    assert captured["base_url"] == R.LOCAL_BASE_URL, "test must exercise the local lane"
+    sent = json.loads(captured["primary_body"])
+    assert sent["stream_options"]["include_usage"] is True
+
+
+def test_streaming_include_usage_preserves_other_stream_options(monkeypatch):
+    """Injection merges into a client-supplied stream_options rather than
+    replacing it."""
+    captured = {}
+
+    async def fake_forward(base_url, path, primary_body, headers, stream, **kw):
+        captured["primary_body"] = primary_body
+        return R.JSONResponse(content={"ok": True})
+    monkeypatch.setattr(R, "forward", fake_forward)
+
+    body = {"model": "qwen3", "messages": [{"role": "user", "content": "hi"}],
+            "stream": True, "stream_options": {"some_other_flag": "keep-me"}}
+    req = _FakeChatRequest(body)
+    asyncio.run(R.chat_completions(req, x_loxo_quality=None, x_loxo_vision=None, authorization=None))
+
+    sent = json.loads(captured["primary_body"])
+    assert sent["stream_options"] == {"some_other_flag": "keep-me", "include_usage": True}
+
+
+def test_non_streaming_body_gets_no_stream_options(monkeypatch):
+    """Injection is gated on stream only -- a non-streaming body is untouched."""
+    captured = {}
+
+    async def fake_forward(base_url, path, primary_body, headers, stream, **kw):
+        captured["primary_body"] = primary_body
+        return R.JSONResponse(content={"ok": True})
+    monkeypatch.setattr(R, "forward", fake_forward)
+
+    body = {"model": "qwen3", "messages": [{"role": "user", "content": "hi"}]}
+    req = _FakeChatRequest(body)
+    asyncio.run(R.chat_completions(req, x_loxo_quality=None, x_loxo_vision=None, authorization=None))
+
+    assert "stream_options" not in json.loads(captured["primary_body"])
+
+
 def test_tier_rate_cards_filters_out_the_full_catalog(monkeypatch):
     # fix 2: /health and /v1/spend must not dump the whole ~300-model catalog --
     # only configured tier cloud_targets + CLOUD_DEFAULT_MODEL are relevant.

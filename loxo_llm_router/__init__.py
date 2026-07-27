@@ -1055,21 +1055,15 @@ async def chat_completions(
     if local_fail is not None:
         return local_fail
 
-    # stream_options.include_usage: inject on cloud-bound streaming bodies so
-    # OpenCode (via @ai-sdk/openai-compatible) reads token counts from the final
-    # SSE chunk and can display cost. Strip it from local-bound bodies — local
-    # servers may not handle it and it serves no purpose there.
+    # stream_options.include_usage: injected on every streaming body, local and
+    # cloud alike, so the final SSE chunk carries token counts. Clients need it
+    # to display cost (OpenCode, via @ai-sdk/openai-compatible), and the A2
+    # adequacy ledger needs it to record tokens at all — without it every local
+    # streaming request lands in the ledger with null usage, which is exactly
+    # where eval-driven routing wants the data. Local support verified against
+    # mlx-lm 0.31.3 (2026-07-27): correct final chunk, empty choices, full usage.
     if stream:
-        if base_url == CLOUD_BASE_URL:
-            body["stream_options"] = {**body.get("stream_options", {}), "include_usage": True}
-        else:
-            so = body.get("stream_options")
-            if isinstance(so, dict) and "include_usage" in so:
-                so = {k: v for k, v in so.items() if k != "include_usage"}
-                if so:
-                    body["stream_options"] = so
-                else:
-                    body.pop("stream_options")
+        body["stream_options"] = {**body.get("stream_options", {}), "include_usage": True}
 
     # B1: prompt-cache injection (auto mechanism; spike-decided, session-validated).
     # Eligibility from the live rate card; client-supplied cache_control wins.

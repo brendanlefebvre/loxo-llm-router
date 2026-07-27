@@ -104,10 +104,11 @@ Constraints:
   `local_unreachable`) instead of falling back — a hard-fail is preferred
   over silent cloud spend.
 
-**Body adjustments in flight:** cloud-bound streaming requests get
-`stream_options.include_usage` injected (so clients receive token counts in
-the final SSE chunk); local-bound requests get it stripped (local servers
-may not accept it).
+**Body adjustments in flight:** every streaming request — local or cloud —
+gets `stream_options.include_usage` injected, so the final SSE chunk carries
+token counts. Clients use them to display cost, and the adequacy ledger uses
+them to record usage; without injection local streaming requests are logged
+with null tokens.
 
 ## Vision policy
 
@@ -160,7 +161,15 @@ change). One metadata-only JSONL entry per completed request lands in
 `$LOXO_STATE_DIR/adequacy.jsonl` (`ledger.py`: `Observation`, `StreamScan`,
 `AdequacyLedger`): class, route, outcome signals (finish reason, tool-call
 JSON validity, token splits incl. cached/reasoning, latency, cost) — never
-message content. Observe-only in v0.2: no routing decision reads it.
+message content. One caveat on those token splits: `reasoning` is `null` on
+local rows, because mlx omits `completion_tokens_details` entirely. Null means
+*unmeasured*, not zero — local models do reason, sometimes heavily (a
+Qwen3-14B title generation took 125s on 2026-07-27, nearly all of it
+reasoning), the count simply is not reported. Cloud rows carry `reasoning: 0`
+when the provider genuinely reports zero, so null and 0 must never be
+normalized together: a `.tokens.reasoning // 0` downstream turns "we don't
+know" into "there was none" and yields a confidently wrong answer.
+Observe-only in v0.2: no routing decision reads it.
 Exception paths (mid-stream disconnects, transport errors without fallback)
 currently write no entry; an error-marker schema addition is planned before
 the dial (v0.4) consumes this data.
