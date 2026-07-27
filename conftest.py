@@ -28,6 +28,7 @@ os.environ["LOXO_STATE_DIR"] = _temp_state_dir.name
 os.environ["SPEND_LEDGER"] = ""  # and never write a ledger from the suite
 os.environ["ADEQUACY_LEDGER"] = ""  # observe-only machinery must not write during tests
 os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = ""  # TRACES singleton resolves at import; must not build a real exporter in tests
+os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = ""  # signal-specific var enables tracing on its own
 os.environ["LOXO_OTEL_ENABLED"] = ""             # same gate, secondary on-switch
 
 import pytest
@@ -56,6 +57,7 @@ _CONFIG_ENV = (
     "XDG_STATE_HOME",
     # OTel tracing — TRACES singleton resolves at import; isolate like the ledgers
     "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
     "LOXO_OTEL_ENABLED",
     "OTEL_SERVICE_NAME",
 )

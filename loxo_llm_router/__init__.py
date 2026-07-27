@@ -1231,7 +1231,7 @@ async def health():
         "spend": spend_summary,
         "otel": {
             "enabled": TRACES.enabled,
-            "endpoint": (_OTEL_CFG or {}).get("endpoint"),
+            "endpoint": TRACES.endpoint or (_OTEL_CFG or {}).get("endpoint"),
             "service_name": (_OTEL_CFG or {}).get("service_name"),
         },
     }

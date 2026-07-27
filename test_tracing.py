@@ -3,7 +3,9 @@ no network, deterministic."""
 
 import pytest
 
-pytest.importorskip("opentelemetry")  # skip cleanly when the [otel] extra is absent
+pytest.importorskip("opentelemetry.sdk")  # the extra ships the SDK; the bare
+# namespace package can exist from opentelemetry-api alone, which would let
+# collection proceed and then fail on the sdk imports below.
 
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor

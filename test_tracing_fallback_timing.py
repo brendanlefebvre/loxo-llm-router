@@ -54,7 +54,9 @@ def test_nonstreaming_fallback_sets_fallback_at_ms(monkeypatch):
     # retry's duration, else the fallback child span degenerates into a sliver
     # at the tail of the root instead of covering the retry.
     assert obs.latency_ms >= _CLOUD_MS
-    assert obs.fallback_at_ms < _CLOUD_MS / 2
+    # Relative, not absolute: a loaded runner can delay the pivot itself, but
+    # the invariant is that the retry's cost lands AFTER the marker.
+    assert obs.latency_ms - obs.fallback_at_ms >= _CLOUD_MS / 2
 
 
 class _StreamResp:
@@ -112,4 +114,6 @@ def test_streaming_fallback_sets_fallback_at_ms(monkeypatch):
     # Same pivot-not-finish contract as the non-streaming path: the marker is
     # taken before the cloud retry is issued, so it precedes that retry's cost.
     assert obs.latency_ms >= _CLOUD_MS
-    assert obs.fallback_at_ms < _CLOUD_MS / 2
+    # Relative, not absolute: a loaded runner can delay the pivot itself, but
+    # the invariant is that the retry's cost lands AFTER the marker.
+    assert obs.latency_ms - obs.fallback_at_ms >= _CLOUD_MS / 2
