@@ -133,5 +133,16 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=https://api.smith.langchain.com/otel
 export OTEL_EXPORTER_OTLP_HEADERS="x-api-key=<LANGSMITH_API_KEY>"
 ```
 
-> Verify LangSmith's current OTLP endpoint path and header name against their
-> live docs before relying on this — both have changed historically.
+Add `,Langsmith-Project=<name>` to the headers to land spans in a project other
+than the default. Regional and self-hosted installs swap the host (`eu.`,
+`apac.`, `aws.` prefixes; self-hosted appends `/api/v1` before `/otel`).
+
+Give the **base** URL above, not `.../otel/v1/traces` — the OTLP/HTTP exporter
+appends the `/v1/traces` signal path itself. LangSmith's own docs hedge on this
+because some collectors don't; ours does.
+
+> Verified against LangSmith 2026-07-27: endpoint path, `x-api-key` header, and
+> the exporter's appended signal path all confirmed by a live export (a wrong
+> key returns `403 Forbidden`, a right one exports silently). Re-check if it
+> ever goes quiet — an export failure is deliberately non-fatal, so a rejected
+> key looks exactly like an idle router: healthy `/health`, no traces.
