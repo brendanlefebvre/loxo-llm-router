@@ -23,6 +23,15 @@ dependencies = [
   "httpx>=0.27",
 ]
 
+[project.optional-dependencies]
+# OpenTelemetry trace export (observe-only). Lazy-imported; the base install
+# needs none of this. Semconv GenAI attributes assumed at the 1.x line shipped
+# below — bump deliberately, not silently.
+otel = [
+  "opentelemetry-sdk>=1.20",
+  "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
+
 [project.urls]
 Homepage = "https://loxorouter.dev/"
 Repository = "https://github.com/brendanlefebvre/loxo-llm-router"

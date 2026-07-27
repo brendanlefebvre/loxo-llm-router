@@ -113,6 +113,7 @@ from .classify import classify
 from .config import Config, VirtualModel, load_config
 from .ledger import (AdequacyLedger, Observation, SpendTracker, StreamScan,
                      resolve_adequacy_ledger, resolve_spend_ledger)
+from .tracing import TraceEmitter, resolve_otel_config
 
 
 def _ts() -> str:
@@ -370,6 +371,9 @@ SPEND = SpendTracker(resolve_spend_ledger(log), log=log)
 # A2: adequacy ledger (observe-only) — the dial's only evidence source.
 ADEQUACY = AdequacyLedger(resolve_adequacy_ledger(), log=log)
 
+_OTEL_CFG = resolve_otel_config()
+TRACES = TraceEmitter.from_config(_OTEL_CFG, log=log)
+
 # Opt-in raw request capture, for grounding classifier fingerprints and the
 # golden harness fixtures. Bodies contain full message content — never enable
 # in shared environments; captures stay on the operator's machines until
@@ -414,7 +418,7 @@ def record(obs: Observation) -> None:
     Plan B (OTel) adds the second sink at THIS one site, not three.
     """
     _spawn(ADEQUACY.write(obs))
-    # Plan B: _spawn(TRACES.emit(obs))  — the emitter hooks here.
+    TRACES.emit(obs)  # observe-only; no-op unless OTel is configured
 
 
 def auth_failed(authorization: str | None) -> Response | None:
@@ -814,6 +818,8 @@ async def forward(
                     served_cloud_model = fb_model
                     served_cloud_provider = _provider_host(CLOUD_BASE_URL)
                     served_reason = "fallback"
+                    if obs is not None:
+                        obs.fallback_at_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
                     can_fallback = False
                     continue
                 await client.aclose()
@@ -899,6 +905,11 @@ async def forward(
                 raise
             fb_model = fallback_cloud_model or CLOUD_DEFAULT_MODEL
             log(f"[router] {primary_url} unreachable, falling back to cloud/{fb_model}")
+            # Mark the pivot BEFORE the retry: the child span is meant to cover
+            # the cloud attempt, so this must be when the retry began, not when
+            # it finished (that would collapse the span to a tail sliver).
+            if obs is not None:
+                obs.fallback_at_ms = int((asyncio.get_event_loop().time() - _t0) * 1000)
             resp = await client.post(
                 f"{fallback_url}{path}", content=fallback_body,
                 headers=_headers_for(fallback_url, client_headers),
@@ -1218,6 +1229,11 @@ async def health():
         },
         "rate_cards": _tier_rate_cards(cards),
         "spend": spend_summary,
+        "otel": {
+            "enabled": TRACES.enabled,
+            "endpoint": TRACES.endpoint or (_OTEL_CFG or {}).get("endpoint"),
+            "service_name": (_OTEL_CFG or {}).get("service_name"),
+        },
     }
 
 

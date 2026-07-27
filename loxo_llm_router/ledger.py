@@ -215,6 +215,7 @@ class Observation:
     usage: dict[str, Any] | None = field(default=None, repr=False)
     usd: float = 0.0
     session_id: str | None = None
+    fallback_at_ms: int | None = None  # tracing-only: elapsed-ms when local->cloud retry began; not serialized to the ledger
 
     def to_entry(self) -> dict[str, Any]:
         u = self.usage or {}
