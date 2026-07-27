@@ -1093,6 +1093,7 @@ async def chat_completions(
         # gets the tier's reasoning effort.
         apply_reasoning(fb, requested_vm)
         cache_mod.inject_cache(fb, cards.get(fallback_cloud_model))
+        # Redundant (primary path stamped body); kept so fb is correct on its own.
         if stream:
             fb["stream_options"] = {**fb.get("stream_options", {}), "include_usage": True}
         fallback_url = CLOUD_BASE_URL
