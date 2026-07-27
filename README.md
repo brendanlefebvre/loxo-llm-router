@@ -18,10 +18,13 @@ it at loxo, send one virtual model id (e.g. `loxo/auto`), and loxo resolves it
 to the right backend and model. On the local side, that backend can be anything
 OpenAI-compatible: MLX, Ollama, llama.cpp, vLLM, LM Studio.
 
-> Today (v0.1.0) loxo routes by **declared intent** — the tier you pick, the
+> Today (v0.2.0) loxo routes by **declared intent** — the tier you pick, the
 > prompt size, an `x-loxo-quality` header. Teaching it to shift work onto local
 > models by *measured* adequacy — the local/frontier "dial" — is the
 > [ROADMAP](ROADMAP.md).
+
+![Jaeger trace of a single request showing local->cloud fallback as a child span](loxo-hero-image.png)
+*Caption: A single request trace with local fallback as a child span*
 
 ## Who this is for
 
@@ -108,6 +111,14 @@ Secrets (`OPENROUTER_API_KEY`, `ROUTER_TOKEN`) are read **only** from the
 environment — never put them in `loxo.toml`. See `loxo.toml.example` and
 `.env.example` for the full schema, and [ARCHITECTURE.md](ARCHITECTURE.md) for
 the config search order, host/port resolution, and routing rules.
+
+## Observability
+
+The following is implemented:
+- Per-request OTel span `loxo.chat_completion` with GenAI semconv attributes
+- `loxo.fallback` child span emitted only when a fallback actually fires
+- Opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`; unset = off, zero overhead
+- Two JSONL ledgers: `spend.jsonl` (cloud cost tracking) and `adequacy.jsonl` (local model performance)
 
 ## Learn more
 
