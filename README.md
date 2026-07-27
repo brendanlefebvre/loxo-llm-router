@@ -118,7 +118,9 @@ The following is implemented:
 - Per-request OTel span `loxo.chat_completion` with GenAI semconv attributes
 - `loxo.fallback` child span emitted only when a fallback actually fires
 - Opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`; unset = off, zero overhead
-- Two JSONL ledgers: `spend.jsonl` (cloud cost tracking) and `adequacy.jsonl` (local model performance)
+- Two JSONL ledgers: `spend.jsonl` (cloud cost per model) and `adequacy.jsonl`
+  (one metadata-only entry per completed request, local and cloud alike — class,
+  route, outcome signals; never message content)
 
 ## Learn more
 
