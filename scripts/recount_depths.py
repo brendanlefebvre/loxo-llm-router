@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""Recount capture depths using Loxo's OWN estimator and OWN configured limit.
+"""Report the depth distribution of captured requests against Rule 3's threshold.
 
-The point is fidelity to the routing decision: Rule 3 fires on
-estimate_prompt_tokens() > LOCAL_CONTEXT_LIMIT, so those are the two things
-that must come from the package rather than a replica.
+Answers "how much of my traffic is even eligible for local routing" by bucketing
+LOXO_CAPTURE_DIR into shallow / mid / in-scope-deep / over-limit.
 
-Run from anywhere the loxo_llm_router package is importable (e.g. the repo root
-with its venv active). Falls back to an inline copy of the function if the
-import has side effects you'd rather avoid -- but prefer the import.
+**The estimator and the limit are imported, never reimplemented.** Rule 3 fires
+on `estimate_prompt_tokens(body) > LOCAL_CONTEXT_LIMIT`, so any answer about
+which side of that line a request falls on has to use those exact two things.
+A hand-rolled char-count proxy was tried on 2026-07-27 and inverted the
+conclusion — it reported 63% of traffic over the limit where the real figure was
+12% — because it counted the serialized message array (picking up role keys and
+tool_call blobs) while omitting the tools array entirely. Two errors in opposite
+directions, both invisible.
+
+There is deliberately no fallback: inside this repo the import cannot fail for
+an interesting reason, and a copy of `estimate_prompt_tokens` living here would
+be the very drift hazard this script exists to demonstrate.
 
 Prints no message content.
 """
@@ -16,36 +24,13 @@ import os
 import pathlib
 import sys
 
+from loxo_llm_router import LOCAL_CONTEXT_LIMIT as limit
+from loxo_llm_router import estimate_prompt_tokens as est
+
 CAPS = pathlib.Path(os.environ.get("LOXO_CAPTURE_DIR")
                     or os.path.expanduser("~/.local/state/loxo-llm-router/captures"))
 
-est = None
-limit = None
-try:
-    from loxo_llm_router import estimate_prompt_tokens as est          # noqa: E402
-    from loxo_llm_router import LOCAL_CONTEXT_LIMIT as limit           # noqa: E402
-    src = "imported from loxo_llm_router (authoritative)"
-except Exception as e:                                                  # noqa: BLE001
-    src = f"FALLBACK inline copy -- import failed: {e}"
-
-    def est(body):                                                      # type: ignore[misc]
-        total = 0
-        for m in body.get("messages", []):
-            c = m.get("content")
-            if isinstance(c, str):
-                total += len(c)
-            elif isinstance(c, list):
-                for part in c:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        total += len(part.get("text", ""))
-        for key in ("tools", "functions"):
-            if key in body:
-                total += len(json.dumps(body[key]))
-        return total // 4
-
-    limit = int(os.environ.get("LOCAL_CONTEXT_LIMIT") or 60000)
-
-print(f"estimator: {src}")
+print("estimator: imported from loxo_llm_router (authoritative)")
 print(f"LOCAL_CONTEXT_LIMIT: {limit}")
 print(f"captures: {CAPS}\n")
 

@@ -1,14 +1,28 @@
 #!/usr/bin/env python3
-"""Verify the prefix-chain claim in the main-adequacy design.
+"""Group captured requests into prefix chains, and report the usable pairs.
 
-Walks LOXO_CAPTURE_DIR in filename order (filenames are timestamped, so that is
-chronological) and for each consecutive pair asks: is capture N's `messages`
-array a byte-identical prefix of capture N+1's?
+Successive captures from one client session are not independent: each one's
+`messages` array is a byte-identical prefix of the next, because the session
+grows by appending. That means capture N ends where a model had to act and
+capture N+1 contains what it actually did — so a chain of length K yields K-1
+(state, next-action) pairs of real production behaviour.
 
-Prints NO message content -- only counts, roles, and hashes. Safe to paste.
+This walks LOXO_CAPTURE_DIR in filename order (timestamped, so chronological)
+and for each consecutive pair reports whether the prefix relationship holds,
+diverges (a different conversation), or shortens (a compaction rewrites history
+rather than appending — the seam any consumer must detect rather than assume).
+
+Downstream consumers should stratify by chain as well as by depth: pairs drawn
+from a single chain share one task, so "deeper context" and "later in this task"
+cannot be told apart within one chain.
+
+A pair is only a decision point if the appended messages begin with an
+`assistant` message; the roles column shows this.
+
+Prints NO message content -- only counts, roles, and truncated hashes.
 
 Usage:
-    python3 check_prefix_chain.py [capture_dir]
+    python3 scripts/check_prefix_chain.py [capture_dir]
 """
 import hashlib
 import json
