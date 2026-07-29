@@ -26,7 +26,7 @@ class Config:
     local_base_url: str
     cloud_base_url: str
     local_models: tuple[str, ...]
-    local_context_limit: int
+    local_context_limit: int | None
     cloud_default_model: str
     tiers: dict[str, VirtualModel]
     # secrets (env-only)
@@ -101,8 +101,11 @@ def load_config() -> Config:
     else:
         local_models = tuple(backends.get("local_models", []))
 
-    local_context_limit = int(os.environ.get("LOCAL_CONTEXT_LIMIT")
-                              or backends.get("local_context_limit", 60000))
+    _raw_limit = os.environ.get("LOCAL_CONTEXT_LIMIT") \
+        or backends.get("local_context_limit")
+    # None = not explicitly configured -> derive from the local server's
+    # /models at startup; 60000 is only the last-resort legacy default.
+    local_context_limit = int(_raw_limit) if _raw_limit is not None else None
     cloud_default_model = (os.environ.get("CLOUD_DEFAULT_MODEL")
                            or backends.get("cloud_default_model", "anthropic/claude-sonnet-4.6"))
 

@@ -35,6 +35,15 @@ def test_local_pinned_tier_uses_local_limit(monkeypatch):
     assert _entries(vms, CARDS)["loxo/local"]["context_length"] == 60000
 
 
+def test_local_pinned_tier_advertises_probed_context(monkeypatch):
+    # When no explicit limit is set, the startup probe's value flows through
+    # to /v1/models for the pinned-local tier.
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", None)
+    monkeypatch.setattr(R, "_derived_local_context", 262144)
+    vms = {"loxo/local": VirtualModel(id="loxo/local", routing="local")}
+    assert _entries(vms, CARDS)["loxo/local"]["context_length"] == 262144
+
+
 def test_unknown_card_falls_back_conservatively():
     vms = {"loxo/x": VirtualModel(id="loxo/x", cloud_target="nope/nope")}
     e = _entries(vms, CARDS)["loxo/x"]

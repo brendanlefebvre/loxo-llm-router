@@ -31,7 +31,8 @@ Configuration (env vars):
   CLOUD_BASE_URL         default https://openrouter.ai/api/v1
   OPENROUTER_API_KEY     required for cloud traffic
   LOCAL_MODELS           comma-separated, e.g. "qwen3.6-35b-a3b,qwen3-30b-a3b"
-  LOCAL_CONTEXT_LIMIT    default 60000 (tokens; ~240k chars)
+  LOCAL_CONTEXT_LIMIT    explicit override (else probed from the local
+                         server's /models at startup, else legacy 60000)
   CLOUD_DEFAULT_MODEL    default anthropic/claude-sonnet-4.6
 
   Configuration: see loxo.default.toml for the full schema. Precedence is
@@ -128,7 +129,9 @@ CLOUD_BASE_URL = _cfg.cloud_base_url
 OPENROUTER_API_KEY = _cfg.openrouter_api_key
 LOCAL_MODELS_ORDER = list(_cfg.local_models)
 LOCAL_MODELS = set(LOCAL_MODELS_ORDER)
-LOCAL_CONTEXT_LIMIT = _cfg.local_context_limit
+LOCAL_CONTEXT_LIMIT = _cfg.local_context_limit  # None unless explicitly set
+LEGACY_CONTEXT_DEFAULT = 60000
+_derived_local_context: int | None = None
 CLOUD_DEFAULT_MODEL = _cfg.cloud_default_model
 QUIET = _cfg.quiet
 ROUTER_TOKEN = _cfg.router_token
@@ -345,6 +348,48 @@ FALLBACK_ERRORS = (
 )
 
 app = FastAPI()
+
+
+def _context_from_models_payload(payload) -> int | None:
+    """Smallest declared context among the local server's models
+    (context_length, vLLM's max_model_len). None when absent/garbage."""
+    vals = []
+    for m in (payload or {}).get("data", []) or []:
+        if not isinstance(m, dict):
+            continue
+        v = m.get("context_length") or m.get("max_model_len")
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+            vals.append(v)
+    return min(vals) if vals else None
+
+
+async def probe_local_context() -> None:
+    """One startup probe of the local backend's /models; cached for the
+    process lifetime. Failure caches None — a down local server must not
+    block requests (they fall back to the explicit/legacy limit)."""
+    global _derived_local_context
+    try:
+        async with httpx.AsyncClient(timeout=LOCAL_CONNECT_TIMEOUT) as client:
+            r = await client.get(f"{LOCAL_BASE_URL}/models")
+            _derived_local_context = _context_from_models_payload(r.json())
+    except Exception:  # noqa: BLE001 - any failure means "unknown", never a crash
+        _derived_local_context = None
+
+
+@app.on_event("startup")
+async def _startup_probe_local_context():
+    await probe_local_context()
+
+
+def effective_local_context() -> int:
+    """Routing threshold precedence: explicit config > startup probe >
+    legacy default. Explicit stays first so operators (and tests
+    monkeypatching LOCAL_CONTEXT_LIMIT) keep a working override."""
+    if LOCAL_CONTEXT_LIMIT is not None:
+        return LOCAL_CONTEXT_LIMIT
+    if _derived_local_context is not None:
+        return _derived_local_context
+    return LEGACY_CONTEXT_DEFAULT
 
 
 def log(msg: str) -> None:
@@ -719,7 +764,7 @@ def pick_target(body: dict[str, Any], quality_header: str | None) -> tuple[str, 
         # routing == "auto"
         if (quality_header or "").lower() == "best":
             return CLOUD_BASE_URL, vm.cloud_target, "virtual-quality-best"
-        if estimate_prompt_tokens(body) > LOCAL_CONTEXT_LIMIT:
+        if estimate_prompt_tokens(body) > effective_local_context():
             return CLOUD_BASE_URL, vm.cloud_target, "virtual-prompt-too-long"
         return LOCAL_BASE_URL, local_target_for(vm, model), "virtual-local"
 
@@ -729,7 +774,7 @@ def pick_target(body: dict[str, Any], quality_header: str | None) -> tuple[str, 
     if (quality_header or "").lower() == "best":
         return CLOUD_BASE_URL, model or CLOUD_DEFAULT_MODEL, "quality-best"
 
-    if estimate_prompt_tokens(body) > LOCAL_CONTEXT_LIMIT:
+    if estimate_prompt_tokens(body) > effective_local_context():
         return CLOUD_BASE_URL, model or CLOUD_DEFAULT_MODEL, "prompt-too-long"
 
     if "/" in model:
@@ -760,10 +805,11 @@ async def _local_pin_preflight(
     if not (vm and vm.routing == "local"):
         return None
     n = estimate_prompt_tokens(body)
-    if n > LOCAL_CONTEXT_LIMIT:
+    limit = effective_local_context()
+    if n > limit:
         return JSONResponse(status_code=422, content={"error": {
             "message": (f"prompt is too large for local context "
-                        f"(~{n} tokens > {LOCAL_CONTEXT_LIMIT}); "
+                        f"(~{n} tokens > {limit}); "
                         f"switch to {AUTO_ID} or {DEEP_ID}"),
             "type": "invalid_request_error", "code": "local_context_exceeded"}})
     try:
@@ -1164,7 +1210,7 @@ def _virtual_model_entries(cards: dict[str, dict[str, Any]]) -> list[dict[str, A
         if vm.advertised_context is not None:
             ctx = vm.advertised_context
         elif vm.routing == "local":
-            ctx = LOCAL_CONTEXT_LIMIT
+            ctx = effective_local_context()
         elif card and card.get("context_length"):
             ctx = card["context_length"]
         else:
@@ -1238,7 +1284,10 @@ async def health():
         "local": LOCAL_BASE_URL,
         "cloud": CLOUD_BASE_URL,
         "local_models": sorted(LOCAL_MODELS),
-        "local_context_limit": LOCAL_CONTEXT_LIMIT,
+        "local_context_limit": effective_local_context(),
+        "local_context_source": ("config-explicit" if LOCAL_CONTEXT_LIMIT is not None
+                                  else "probe" if _derived_local_context is not None
+                                  else "legacy-default"),
         "local_connect_timeout": LOCAL_CONNECT_TIMEOUT,
         "vision": {
             "enabled": bool(VISION_SHIM_MODEL or VISION_CLOUD_MODEL),
