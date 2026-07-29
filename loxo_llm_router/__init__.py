@@ -439,14 +439,17 @@ def auth_failed(authorization: str | None) -> Response | None:
     return None
 
 
-# Chars-per-token divisor for estimate_prompt_tokens. PROVISIONAL until
-# Task 8 pins it: 3.6 was hand-calibrated against Qwen3-14B-4bit counts,
-# which is also the corpus reference tokenizer, so llitmus-eval's
-# scripts/calibrate_router_divisor.py is expected to confirm it (never
-# underestimates on the 15-case corpus). The value equaling Qwen3.6's
-# version number is pure coincidence — this is an empirical ratio, not
-# model-derived.
-ESTIMATE_CHARS_PER_TOKEN = 3.6
+# Chars-per-token divisor for estimate_prompt_tokens. Calibrated against the
+# reference tokenizer (mlx-community/Qwen3-14B-4bit) over the 15-case main
+# replay corpus (cases/main_replay.jsonl) on 2026-07-29 by
+# llitmus-eval/scripts/calibrate_router_divisor.py: min(chars/ref_tokens)
+# over the corpus, floored to 2 decimals. At 3.5 the estimator never
+# underestimates the reference count (worst under +0.2%, worst over +22.1%).
+# Recalibrate if the corpus changes; the standing property test
+# (tests/test_router_divisor_property.py) fails loudly if the pinned value
+# ever underestimates. The value close to Qwen3.6's version number is pure
+# coincidence — this is an empirical chars-per-token ratio, not model-derived.
+ESTIMATE_CHARS_PER_TOKEN = 3.5
 
 
 def _count_prompt_chars(body: dict[str, Any]) -> int:
