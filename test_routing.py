@@ -99,12 +99,13 @@ def test_rule5_default_local():
 # --- estimate_prompt_tokens ---------------------------------------------------
 
 def test_estimate_counts_message_text():
-    # 40 chars / 4 = 10 tokens
-    assert R.estimate_prompt_tokens(_body(text="a" * 40)) == 10
+    # Exact arithmetic, derived from the constant so recalibration
+    # (Task 8) doesn't break the shape check.
+    expected = int(40 / R.ESTIMATE_CHARS_PER_TOKEN)
+    assert R.estimate_prompt_tokens(_body(text="a" * 40)) == expected
 
 
 def test_estimate_counts_tool_schemas():
-    # Tool/function schemas are counted too (agentic clients send large ones).
     no_tools = R.estimate_prompt_tokens(_body(text="hi"))
     with_tools = R.estimate_prompt_tokens(_body(text="hi", tools=[{"x": "y" * 400}]))
     assert with_tools > no_tools
@@ -113,9 +114,32 @@ def test_estimate_counts_tool_schemas():
 def test_estimate_counts_list_content_text_parts():
     body = {"messages": [{"role": "user", "content": [
         {"type": "text", "text": "b" * 80},
-        {"type": "image_url", "image_url": {"url": "data:..."}},  # not counted as text
+        {"type": "image_url", "image_url": {"url": "data:..."}},  # not counted
     ]}]}
-    assert R.estimate_prompt_tokens(body) == 20  # 80/4, image part ignored
+    assert R.estimate_prompt_tokens(body) == int(80 / R.ESTIMATE_CHARS_PER_TOKEN)
+
+
+def test_estimate_counts_tool_calls_and_reasoning():
+    """Regression for the 2026-07-28 blind spot: tool_calls,
+    reasoning_content, and tool_call_id were 87% of mr-012's real prompt
+    and counted as zero."""
+    bare = {"messages": [{"role": "user", "content": "hi"}]}
+    loaded = {"messages": [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": None,
+         "reasoning_content": "r" * 900,
+         "tool_calls": [{"id": "call_1", "type": "function",
+                         "function": {"name": "read",
+                                      "arguments": "{\"filePath\": \"" + "p" * 800 + "\"}"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "c" * 700},
+    ]}
+    assert R.estimate_prompt_tokens(loaded) > R.estimate_prompt_tokens(bare) + (
+        (900 + 800 + 700) // 5)  # loose floor: the new fields dominate
+
+
+def test_count_prompt_chars_is_divisor_free():
+    body = _body(text="a" * 36)
+    assert R._count_prompt_chars(body) == 36
 
 
 # --- is_local_model -----------------------------------------------------------

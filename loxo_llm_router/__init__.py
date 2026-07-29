@@ -439,12 +439,21 @@ def auth_failed(authorization: str | None) -> Response | None:
     return None
 
 
-def estimate_prompt_tokens(body: dict[str, Any]) -> int:
-    """~4 chars per token is a good English approximation; fine for threshold gating.
+# Chars-per-token divisor for estimate_prompt_tokens. PROVISIONAL until
+# Task 8 pins it: 3.6 was hand-calibrated against Qwen3-14B-4bit counts,
+# which is also the corpus reference tokenizer, so llitmus-eval's
+# scripts/calibrate_router_divisor.py is expected to confirm it (never
+# underestimates on the 15-case corpus). The value equaling Qwen3.6's
+# version number is pure coincidence — this is an empirical ratio, not
+# model-derived.
+ESTIMATE_CHARS_PER_TOKEN = 3.6
 
-    Counts message content AND tool/function/system schemas — agentic clients
-    (OpenCode) send large tool definitions that can dominate the real prompt size.
-    """
+
+def _count_prompt_chars(body: dict[str, Any]) -> int:
+    """Characters of every request field the chat template renders into the
+    prompt — not just content text. On agentic traffic (OpenCode),
+    tool_calls/reasoning_content/tool_call_id dominated real prompt size
+    (87% of mr-012) and were previously counted as zero."""
     total = 0
     for m in body.get("messages", []):
         content = m.get("content")
@@ -454,10 +463,25 @@ def estimate_prompt_tokens(body: dict[str, Any]) -> int:
             for part in content:
                 if isinstance(part, dict) and part.get("type") == "text":
                     total += len(part.get("text", ""))
+        for key in ("reasoning_content", "tool_call_id", "name"):
+            v = m.get(key)
+            if isinstance(v, str):
+                total += len(v)
+        if m.get("tool_calls"):
+            total += len(json.dumps(m["tool_calls"]))
     for key in ("tools", "functions"):
         if key in body:
             total += len(json.dumps(body[key]))
-    return total // 4
+    return total
+
+
+def estimate_prompt_tokens(body: dict[str, Any]) -> int:
+    """Conservative token estimate for threshold gating: full-field char
+    count over a divisor calibrated to never underestimate on the eval
+    corpus. Asymmetric failure modes drive the conservatism: an undercount
+    sends an over-long prompt to a local model (garbage or a crash); an
+    overcount sends it to cloud (costs money, works)."""
+    return int(_count_prompt_chars(body) / ESTIMATE_CHARS_PER_TOKEN)
 
 
 def is_local_model(model_name: str) -> bool:
