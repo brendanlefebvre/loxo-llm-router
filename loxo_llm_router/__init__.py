@@ -484,16 +484,29 @@ def auth_failed(authorization: str | None) -> Response | None:
     return None
 
 
-# Chars-per-token divisor for estimate_prompt_tokens. Calibrated against the
-# reference tokenizer (mlx-community/Qwen3-14B-4bit) over the 15-case main
-# replay corpus (cases/main_replay.jsonl) on 2026-07-29 by
+# The tokenizer the divisor below was calibrated against. Named here because
+# the calibration is only valid for tokenizers that segment like this one:
+# cross-family variance (Qwen vs Llama vs Mistral) is far larger than the
+# corpus variance the divisor was fitted to.
+ESTIMATE_DIVISOR_REF_TOKENIZER = "mlx-community/Qwen3-14B-4bit"
+
+# Chars-per-token divisor for estimate_prompt_tokens. Calibrated against
+# ESTIMATE_DIVISOR_REF_TOKENIZER over the 15-case main replay corpus
+# (cases/main_replay.jsonl) on 2026-07-29 by
 # llitmus-eval/scripts/calibrate_router_divisor.py: min(chars/ref_tokens)
-# over the corpus, floored to 2 decimals. At 3.5 the estimator never
-# underestimates the reference count (worst under +0.2%, worst over +22.1%).
-# Recalibrate if the corpus changes; the standing property test
-# (tests/test_router_divisor_property.py) fails loudly if the pinned value
-# ever underestimates. The value close to Qwen3.6's version number is pure
-# coincidence — this is an empirical chars-per-token ratio, not model-derived.
+# over the corpus, times a deliberate safety factor, floored to 2 decimals.
+#
+# The safety factor is load-bearing: min() over 15 cases is an EMPIRICAL
+# MINIMUM, not a bound. Without it the pinned value sits at the edge of the
+# observed data (worst under +0.2%), so any traffic denser than the densest
+# case ever seen would underestimate. The margin buys headroom on the cheap
+# side of the asymmetry documented in estimate_prompt_tokens.
+#
+# Recalibrate if the corpus changes OR the local model family changes; the
+# standing property test (tests/test_router_divisor_property.py) fails loudly
+# if the pinned value ever underestimates on the corpus. The value close to
+# Qwen3.6's version number is pure coincidence — this is an empirical
+# chars-per-token ratio, not model-derived.
 ESTIMATE_CHARS_PER_TOKEN = 3.5
 
 
