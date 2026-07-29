@@ -132,6 +132,11 @@ LOCAL_MODELS = set(LOCAL_MODELS_ORDER)
 LOCAL_CONTEXT_LIMIT = _cfg.local_context_limit  # None unless explicitly set
 LEGACY_CONTEXT_DEFAULT = 60000
 _derived_local_context: int | None = None
+
+# Sentinel distinguishing "not computed yet" from "computed, found nothing"
+# (which is legitimately None) for the HF-cache tier below.
+_HF_CONTEXT_UNSET = object()
+_hf_derived_context: int | None = _HF_CONTEXT_UNSET
 CLOUD_DEFAULT_MODEL = _cfg.cloud_default_model
 QUIET = _cfg.quiet
 ROUTER_TOKEN = _cfg.router_token
@@ -381,14 +386,76 @@ async def _startup_probe_local_context():
     await probe_local_context()
 
 
+def _hf_cache_context(repo: str | None) -> int | None:
+    """Native context length for a model repo, read directly from the local
+    HuggingFace hub cache's config.json.
+
+    Stdlib only: the router's interpreter has neither huggingface_hub nor
+    transformers installed (and must not gain them), so this reads the cache
+    layout by hand instead of calling try_to_load_from_cache():
+
+        {HF_HOME or ~/.cache/huggingface}/hub/models--{org}--{name}/snapshots/{rev}/config.json
+
+    Mirrors llitmus-eval's resolve_context_length() (litmus_common.py) so the
+    two repos agree: top-level ``max_position_embeddings`` wins, then
+    ``text_config.max_position_embeddings`` (Qwen3.6 / gemma-4 / Qwen3-VL nest
+    it there); a value only counts if it's an int (bool is an int subclass --
+    True must not resolve to 1) and > 0. Any failure -- no repo, no cache dir,
+    unreadable, malformed JSON, neither key -- returns None, never a default.
+    """
+    if not repo:
+        return None
+    hf_home = os.environ.get("HF_HOME") or str(pathlib.Path.home() / ".cache" / "huggingface")
+    model_dir_name = "models--" + repo.replace("/", "--")
+    snapshots_dir = pathlib.Path(hf_home) / "hub" / model_dir_name / "snapshots"
+    try:
+        revisions = sorted(p.name for p in snapshots_dir.iterdir() if p.is_dir())
+    except OSError:
+        return None
+    if not revisions:
+        return None
+    # Multiple snapshot revisions can coexist (e.g. mid-update); any is
+    # acceptable per the task spec, so pick deterministically: sorted last.
+    config_path = snapshots_dir / revisions[-1] / "config.json"
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return None
+    for scope in (cfg, cfg.get("text_config") or {}):
+        if not isinstance(scope, dict):
+            continue
+        v = scope.get("max_position_embeddings")
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+            return v
+    return None
+
+
+def _cached_hf_local_context() -> int | None:
+    """_hf_cache_context() for LOCAL_MODELS_ORDER[0], computed once per
+    process rather than per call. effective_local_context() sits on the hot
+    routing path, so this must not stat the filesystem on every request."""
+    global _hf_derived_context
+    if _hf_derived_context is _HF_CONTEXT_UNSET:
+        repo = LOCAL_MODELS_ORDER[0] if LOCAL_MODELS_ORDER else None
+        _hf_derived_context = _hf_cache_context(repo)
+    return _hf_derived_context
+
+
 def effective_local_context() -> int:
-    """Routing threshold precedence: explicit config > startup probe >
-    legacy default. Explicit stays first so operators (and tests
-    monkeypatching LOCAL_CONTEXT_LIMIT) keep a working override."""
+    """Routing threshold precedence: explicit config > startup probe > HF
+    cache (served model's native context) > legacy default. Explicit stays
+    first so operators (and tests monkeypatching LOCAL_CONTEXT_LIMIT) keep a
+    working override. Probe outranks the HF cache because a probe reflects
+    the actual serving configuration -- e.g. vLLM started with a reduced
+    --max-model-len -- while the cache only knows the model's native ceiling."""
     if LOCAL_CONTEXT_LIMIT is not None:
         return LOCAL_CONTEXT_LIMIT
     if _derived_local_context is not None:
         return _derived_local_context
+    hf_context = _cached_hf_local_context()
+    if hf_context is not None:
+        return hf_context
     return LEGACY_CONTEXT_DEFAULT
 
 
@@ -1300,6 +1367,7 @@ async def health():
         "local_context_limit": effective_local_context(),
         "local_context_source": ("config-explicit" if LOCAL_CONTEXT_LIMIT is not None
                                   else "probe" if _derived_local_context is not None
+                                  else "hf-cache" if _cached_hf_local_context() is not None
                                   else "legacy-default"),
         "local_connect_timeout": LOCAL_CONNECT_TIMEOUT,
         "vision": {

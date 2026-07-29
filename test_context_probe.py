@@ -1,7 +1,9 @@
 """Derived local-context threshold: explicit config > startup probe of
-{LOCAL_BASE_URL}/models > legacy 60000 default. A down local server must
-never block routing (probe failure -> cache stays None -> fallback)."""
+{LOCAL_BASE_URL}/models > HF cache of the served model's config.json > legacy
+60000 default. A down local server must never block routing (probe failure ->
+cache stays None -> fallback)."""
 import asyncio
+import json
 
 from fastapi.testclient import TestClient
 
@@ -47,6 +49,7 @@ def test_effective_probe_when_no_explicit(monkeypatch):
 def test_effective_legacy_default_last(monkeypatch):
     monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", None)
     monkeypatch.setattr(R, "_derived_local_context", None)
+    monkeypatch.setattr(R, "_hf_derived_context", None)  # cache tier: nothing found either
     assert R.effective_local_context() == 60000
 
 
@@ -120,3 +123,130 @@ def test_startup_hook_runs_the_probe(monkeypatch):
     with TestClient(R.app):
         pass
     assert R._derived_local_context == 40960
+
+
+# --- HF cache tier: _hf_cache_context(repo) ----------------------------------
+
+def _write_hf_config(tmp_path, monkeypatch, repo, config, revision="abc123"):
+    """Build a fake HF hub cache tree under tmp_path and point HF_HOME at it:
+    {tmp_path}/hub/models--{org}--{name}/snapshots/{revision}/config.json"""
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    model_dir = "models--" + repo.replace("/", "--")
+    snap_dir = tmp_path / "hub" / model_dir / "snapshots" / revision
+    snap_dir.mkdir(parents=True)
+    (snap_dir / "config.json").write_text(json.dumps(config))
+
+
+def test_hf_cache_top_level_max_position_embeddings(tmp_path, monkeypatch):
+    repo = "mlx-community/Qwen3-14B-4bit"
+    _write_hf_config(tmp_path, monkeypatch, repo, {"max_position_embeddings": 40960})
+    assert R._hf_cache_context(repo) == 40960
+
+
+def test_hf_cache_nested_text_config_max_position_embeddings(tmp_path, monkeypatch):
+    repo = "mlx-community/Qwen3.6-VL-30B"
+    _write_hf_config(tmp_path, monkeypatch, repo,
+                      {"text_config": {"max_position_embeddings": 262144}})
+    assert R._hf_cache_context(repo) == 262144
+
+
+def test_hf_cache_top_level_beats_nested(tmp_path, monkeypatch):
+    repo = "mlx-community/Some-Model"
+    _write_hf_config(tmp_path, monkeypatch, repo, {
+        "max_position_embeddings": 8192,
+        "text_config": {"max_position_embeddings": 262144},
+    })
+    assert R._hf_cache_context(repo) == 8192
+
+
+def test_hf_cache_missing_model_dir_is_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    assert R._hf_cache_context("mlx-community/Not-Cached") is None
+
+
+def test_hf_cache_malformed_json_is_none(tmp_path, monkeypatch):
+    repo = "mlx-community/Broken-Config"
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    model_dir = "models--" + repo.replace("/", "--")
+    snap_dir = tmp_path / "hub" / model_dir / "snapshots" / "rev1"
+    snap_dir.mkdir(parents=True)
+    (snap_dir / "config.json").write_text("{not valid json")
+    assert R._hf_cache_context(repo) is None
+
+
+def test_hf_cache_bool_does_not_resolve_as_int(tmp_path, monkeypatch):
+    repo = "mlx-community/Weird-Config"
+    _write_hf_config(tmp_path, monkeypatch, repo, {"max_position_embeddings": True})
+    assert R._hf_cache_context(repo) is None
+
+
+def test_hf_cache_empty_repo_is_none(monkeypatch):
+    assert R._hf_cache_context(None) is None
+    assert R._hf_cache_context("") is None
+
+
+# --- HF cache tier: which model, and the once-per-process cache -------------
+
+def test_cached_hf_local_context_empty_local_models_is_none(monkeypatch):
+    monkeypatch.setattr(R, "LOCAL_MODELS_ORDER", [])
+    monkeypatch.setattr(R, "_hf_derived_context", R._HF_CONTEXT_UNSET)
+    assert R._cached_hf_local_context() is None
+
+
+def test_cached_hf_local_context_computed_once(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_hf_cache_context(repo):
+        calls.append(repo)
+        return 12345
+
+    monkeypatch.setattr(R, "LOCAL_MODELS_ORDER", ["mlx-community/Qwen3-14B-4bit"])
+    monkeypatch.setattr(R, "_hf_derived_context", R._HF_CONTEXT_UNSET)
+    monkeypatch.setattr(R, "_hf_cache_context", fake_hf_cache_context)
+
+    assert R._cached_hf_local_context() == 12345
+    assert R._cached_hf_local_context() == 12345
+    assert len(calls) == 1  # hot path: not re-statting on the second call
+
+
+def test_effective_local_context_hot_path_not_restatting(monkeypatch):
+    """effective_local_context() must not re-derive the HF-cache tier on
+    every call once it has been computed once."""
+    calls = []
+
+    def fake_hf_cache_context(repo):
+        calls.append(repo)
+        return 12345
+
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", None)
+    monkeypatch.setattr(R, "_derived_local_context", None)
+    monkeypatch.setattr(R, "LOCAL_MODELS_ORDER", ["mlx-community/Qwen3-14B-4bit"])
+    monkeypatch.setattr(R, "_hf_derived_context", R._HF_CONTEXT_UNSET)
+    monkeypatch.setattr(R, "_hf_cache_context", fake_hf_cache_context)
+
+    assert R.effective_local_context() == 12345
+    assert R.effective_local_context() == 12345
+    assert len(calls) == 1
+
+
+# --- precedence: explicit > probe > HF cache > legacy default ---------------
+
+def test_precedence_explicit_beats_hf_cache(monkeypatch):
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", 999)
+    monkeypatch.setattr(R, "_derived_local_context", None)
+    monkeypatch.setattr(R, "_hf_derived_context", 40960)
+    assert R.effective_local_context() == 999
+
+
+def test_precedence_probe_beats_hf_cache(monkeypatch):
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", None)
+    monkeypatch.setattr(R, "_derived_local_context", 8888)
+    monkeypatch.setattr(R, "_hf_derived_context", 40960)
+    assert R.effective_local_context() == 8888
+
+
+def test_precedence_hf_cache_beats_legacy_default(monkeypatch):
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", None)
+    monkeypatch.setattr(R, "_derived_local_context", None)
+    monkeypatch.setattr(R, "_hf_derived_context", 40960)
+    assert R.effective_local_context() == 40960
