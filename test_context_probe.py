@@ -4,6 +4,8 @@
 cache stays None -> fallback)."""
 import asyncio
 import json
+import threading
+import time
 
 from fastapi.testclient import TestClient
 
@@ -250,3 +252,85 @@ def test_precedence_hf_cache_beats_legacy_default(monkeypatch):
     monkeypatch.setattr(R, "_derived_local_context", None)
     monkeypatch.setattr(R, "_hf_derived_context", 40960)
     assert R.effective_local_context() == 40960
+
+
+# --- bounded HF cache read ----------------------------------------------------
+# A filesystem read can hang rather than fail: macOS TCC blocks a protected
+# path while waiting for a consent prompt no launchd job can show, and an
+# unreachable network mount sits in uninterruptible sleep. Neither raises, so
+# try/except OSError never fires. _hf_cache_context bounds the read and treats
+# an overrun exactly like a cache miss.
+
+def test_hanging_read_returns_none_within_timeout(monkeypatch):
+    started = threading.Event()
+
+    def _never_returns(repo):
+        started.set()
+        time.sleep(30)          # simulates a TCC-blocked / dead-mount read
+        return 999999           # must never reach the caller
+
+    monkeypatch.setattr(R, "_read_hf_cache_context", _never_returns)
+    monkeypatch.setattr(R, "HF_CACHE_READ_TIMEOUT", 0.2)
+
+    t0 = time.monotonic()
+    result = R._hf_cache_context("mlx-community/Whatever-4bit")
+    elapsed = time.monotonic() - t0
+
+    assert result is None
+    assert started.is_set(), "worker should have actually started"
+    assert elapsed < 5, f"gave up in {elapsed:.2f}s; must not wait on the read"
+
+
+def test_hanging_read_worker_is_daemon_so_exit_is_not_blocked(monkeypatch):
+    """A thread stuck in a syscall cannot be killed, so it is abandoned --
+    daemon=True keeps the abandoned thread from holding up interpreter exit."""
+    captured = {}
+    real_thread = threading.Thread
+
+    def _spy(*args, **kwargs):
+        t = real_thread(*args, **kwargs)
+        captured["daemon"] = t.daemon
+        return t
+
+    monkeypatch.setattr(R, "_read_hf_cache_context", lambda repo: time.sleep(30))
+    monkeypatch.setattr(R, "HF_CACHE_READ_TIMEOUT", 0.2)
+    monkeypatch.setattr(threading, "Thread", _spy)
+
+    R._hf_cache_context("mlx-community/Whatever-4bit")
+    assert captured.get("daemon") is True
+
+
+def test_fast_read_still_returns_its_value(monkeypatch):
+    monkeypatch.setattr(R, "_read_hf_cache_context", lambda repo: 40960)
+    monkeypatch.setattr(R, "HF_CACHE_READ_TIMEOUT", 5.0)
+    assert R._hf_cache_context("mlx-community/Qwen3-14B-4bit") == 40960
+
+
+def test_worker_exception_becomes_none_not_a_crash(monkeypatch):
+    def _boom(repo):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(R, "_read_hf_cache_context", _boom)
+    monkeypatch.setattr(R, "HF_CACHE_READ_TIMEOUT", 5.0)
+    assert R._hf_cache_context("mlx-community/Qwen3-14B-4bit") is None
+
+
+def test_timeout_is_cached_not_retried_per_request(monkeypatch):
+    """A timeout is cached like any other miss. Retrying per request would
+    stall the routing hot path by the timeout on every call."""
+    calls = []
+
+    def _slow(repo):
+        calls.append(repo)
+        time.sleep(30)
+
+    monkeypatch.setattr(R, "_read_hf_cache_context", _slow)
+    monkeypatch.setattr(R, "HF_CACHE_READ_TIMEOUT", 0.2)
+    monkeypatch.setattr(R, "_hf_derived_context", R._HF_CONTEXT_UNSET)
+    monkeypatch.setattr(R, "LOCAL_MODELS_ORDER", ["mlx-community/Qwen3-14B-4bit"])
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", None)
+    monkeypatch.setattr(R, "_derived_local_context", None)
+
+    assert R.effective_local_context() == R.LEGACY_CONTEXT_DEFAULT
+    assert R.effective_local_context() == R.LEGACY_CONTEXT_DEFAULT
+    assert len(calls) == 1, f"read attempted {len(calls)}x; must be cached"

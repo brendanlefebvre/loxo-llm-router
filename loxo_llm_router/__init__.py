@@ -102,6 +102,7 @@ import itertools
 import json
 import os
 import pathlib
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -149,6 +150,13 @@ AUTO_ID = f"{ROUTER_NS}/auto"
 DEEP_ID = f"{ROUTER_NS}/deep"
 LOCAL_TIER_ID = f"{ROUTER_NS}/local"
 LOCAL_CONNECT_TIMEOUT = float(os.environ.get("LOCAL_CONNECT_TIMEOUT", "5"))
+
+# Wall-clock bound on reading config.json from the HF cache. Not a performance
+# knob: a local read is sub-millisecond or it is pathological. It exists because
+# some filesystem states block instead of erroring -- macOS TCC waiting on a
+# consent prompt no launchd job can show, or an unreachable network mount in
+# uninterruptible sleep -- and neither raises, so try/except never fires.
+HF_CACHE_READ_TIMEOUT = 2.0
 
 
 def resolve_virtual(model_id: str) -> VirtualModel | None:
@@ -386,7 +394,7 @@ async def _startup_probe_local_context():
     await probe_local_context()
 
 
-def _hf_cache_context(repo: str | None) -> int | None:
+def _read_hf_cache_context(repo: str | None) -> int | None:
     """Native context length for a model repo, read directly from the local
     HuggingFace hub cache's config.json.
 
@@ -429,6 +437,34 @@ def _hf_cache_context(repo: str | None) -> int | None:
         if isinstance(v, int) and not isinstance(v, bool) and v > 0:
             return v
     return None
+
+
+def _hf_cache_context(repo: str | None) -> int | None:
+    """_read_hf_cache_context() bounded by HF_CACHE_READ_TIMEOUT.
+
+    A hang is treated exactly like a cache miss: return None and let the
+    caller fall through the precedence chain. The read runs in a worker
+    thread because a thread stuck in a syscall cannot be killed -- so it is
+    abandoned rather than joined, and daemon=True keeps the abandoned thread
+    from holding up interpreter exit. At most one such thread can leak per
+    process, since _cached_hf_local_context() calls this once.
+    """
+    box: dict[str, int | None] = {}
+
+    def _worker() -> None:
+        try:
+            box["v"] = _read_hf_cache_context(repo)
+        except Exception:  # noqa: BLE001 - a miss, never a crashed request
+            pass
+
+    t = threading.Thread(target=_worker, name="hf-cache-read", daemon=True)
+    t.start()
+    t.join(HF_CACHE_READ_TIMEOUT)
+    if t.is_alive():
+        log(f"[router] HF cache read for {repo!r} exceeded "
+            f"{HF_CACHE_READ_TIMEOUT}s; treating as unresolved")
+        return None
+    return box.get("v")
 
 
 def _cached_hf_local_context() -> int | None:
