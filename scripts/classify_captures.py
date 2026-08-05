@@ -22,7 +22,13 @@ except ImportError:
 
 
 def system_opener(body, n=90):
-    """First system/developer message text — the substring classify() fingerprints on."""
+    """First system/developer message text — the substring classify() fingerprints on.
+
+    Mirrors classify.py's _system_text(): list content joins ALL text parts.
+    Returning only the first would print an opener that omits the fingerprint
+    the verdict was actually reached on, which is the one thing this column
+    exists to show.
+    """
     for m in body.get("messages", []):
         if not (isinstance(m, dict) and m.get("role") in ("system", "developer")):
             continue
@@ -30,9 +36,10 @@ def system_opener(body, n=90):
         if isinstance(c, str):
             return c[:n]
         if isinstance(c, list):
-            for p in c:
-                if isinstance(p, dict) and p.get("type") == "text":
-                    return (p.get("text") or "")[:n]
+            return " ".join(
+                part.get("text", "") for part in c
+                if isinstance(part, dict) and part.get("type") == "text"
+            )[:n]
     return "(no system/developer message)"
 
 
@@ -41,6 +48,11 @@ def scan(d):
     for f in sorted(pathlib.Path(d).glob("req-*.json")):
         try:
             body = json.loads(f.read_text())
+            if not isinstance(body, dict):
+                # A JSON array or scalar parses fine but has no .get(), so it
+                # would raise inside classify() and kill the batch this handler
+                # exists to keep alive.
+                raise ValueError(f"capture root is {type(body).__name__}, not an object")
         except Exception as e:  # noqa: BLE001 - report, don't abort the batch
             rows.append((f.name, "PARSE-ERR", str(e)[:60]))
             continue
@@ -49,6 +61,9 @@ def scan(d):
 
 
 def main(dirs):
+    missing = [d for d in dirs if not pathlib.Path(d).is_dir()]
+    if missing:
+        sys.exit("not a capture directory: " + ", ".join(missing))
     for d in dirs:
         rows = scan(d)
         counts = Counter(r[1] for r in rows)
@@ -58,8 +73,12 @@ def main(dirs):
             print(f"  {cls:11} {name}{flag}")
             print(f"              opener: {opener!r}")
         print(f"  totals: {dict(counts)}")
-        if rows:
-            print(f"  unknown rate: {counts.get('unknown', 0) / len(rows):.0%}")
+        classified = len(rows) - counts.get("PARSE-ERR", 0)
+        if classified:
+            print(f"  unknown rate: {counts.get('unknown', 0) / classified:.0%}"
+                  f"  ({classified} classified)")
+        else:
+            print("  unknown rate: n/a (nothing classified)")
     print(
         "\nVerdict: if the v2 dir's main-turn request classifies 'main', the "
         "fingerprints held.\nIf it flipped to 'unknown', the sidecar moved the "
