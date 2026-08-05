@@ -70,7 +70,7 @@ or `ROUTER_NS`). A tier declares:
 - `cloud_target` / `local_target`: the real model ids to send
 - `vision`: `native` | `shim` | `local` | `reject` (below)
 - `advertised_context`: surfaced as `context_length` in `/v1/models`;
-  defaults to the local context limit for local-pinned tiers
+  defaults to the effective local context (below) for local-pinned tiers
 
 ## Routing (first match wins)
 
@@ -78,17 +78,102 @@ For each `/v1/chat/completions` request:
 
 1. `model` matches a tier id → that tier's policy. For `auto` tiers:
    `x-loxo-quality: best` header → cloud; estimated prompt tokens >
-   `local_context_limit` → cloud; else local.
+   the effective local context → cloud; else local.
 2. `model` matches a `local_models` entry → local (explicit local intent)
 3. `x-loxo-quality: best` → cloud
-4. estimated prompt > `local_context_limit` → cloud (the estimate counts
-   tool/function schemas too — agentic clients send large tool definitions)
+4. estimated prompt > the effective local context → cloud
 5. `model` contains `/` → cloud (provider-prefixed ids are OpenRouter's
    convention)
 6. default → local
 
-Token estimation is ~4 chars/token — deliberately cheap, used only for
-threshold gating.
+## The context gate
+
+Rules 1 and 4 above are one comparison — `estimate_prompt_tokens(body) >
+effective_local_context()` — and both sides are derived rather than assumed.
+The failure modes are asymmetric: underestimating the prompt or overstating
+the limit sends an over-long request to a local model, which produces garbage
+or crashes; erring the other way sends it to cloud, which costs money and
+works. Both sides are therefore biased toward cloud.
+
+**The estimate (left side).** `_count_prompt_chars` counts every request
+field the chat template renders — not just `content`, but `tool_calls`,
+`reasoning_content`, `tool_call_id`, `name`, and the `tools`/`functions`
+schemas. Agentic clients send large tool definitions and tool-call histories;
+on one replay case those fields were 87% of the real prompt and had been
+counted as zero. The char total is divided by `ESTIMATE_CHARS_PER_TOKEN`, a
+constant calibrated so the estimate never underestimates the reference
+tokenizer on the replay corpus — see "Calibrating the divisor" below.
+
+**The limit (right side).** `effective_local_context()` resolves in
+precedence order, and `/health` reports which tier answered under
+`local_context_source`:
+
+| Source | Where it comes from |
+|---|---|
+| `config-explicit` | `LOCAL_CONTEXT_LIMIT` env or `local_context_limit` in TOML — an operator override, always wins |
+| `probe` | The local backend's `/models`, read once at startup (`context_length` / vLLM's `max_model_len`); smallest wins. **vLLM-style backends only — see below** |
+| `hf-cache` | `max_position_embeddings` from the served model's `config.json` in the local HuggingFace cache. The effective tier on MLX |
+| `legacy-default` | `60000` — the historical hardcoded value, now only a last resort |
+
+The probe outranks the cache because it reflects the *serving* configuration
+(vLLM started with a reduced `--max-model-len`), while the cache only knows
+the model's native ceiling.
+
+**On MLX the probe never fires.** `mlx_lm.server`'s `/models` returns only
+`id`/`object`/`created` — no context field of any kind — so the probe
+resolves `None` on every startup and `hf-cache` answers. This is by the
+server's design, not a transient failure, and it has a consequence worth
+stating plainly: **a constrained MLX serving window is invisible to the
+router.** The cache reports the model's native ceiling and nothing in the
+chain can learn that the server was started with less. Where vLLM would
+self-report a reduced `--max-model-len`, MLX cannot, so any serving-side cap
+(KV-cache limits, memory headroom on the box) has to be pinned by hand as
+`local_context_limit` / `LOCAL_CONTEXT_LIMIT`. On an MLX deployment an
+explicit limit is not redundant with the derivation — it is the only way to
+express something the derivation cannot see.
+
+Every derivation fails closed to the next tier:
+an unreachable backend, an unmounted cache volume, or malformed JSON yields
+`None`, never a wrong number. The cache read is bounded by
+`HF_CACHE_READ_TIMEOUT` because some filesystem states block instead of
+erroring — a macOS TCC consent prompt no launchd job can answer, an
+unreachable network mount — and neither raises, so `try/except` never fires.
+`llm-router-serve.sh` pins `HF_HOME` to the internal cache for the same
+reason.
+
+**Calibrating the divisor.** The corpus, the reference tokenizer, and the
+calibration tooling live in the companion `llitmus-eval` repo, not here —
+loxo's interpreter has neither `transformers` nor `huggingface_hub` and must
+not gain them. `llitmus-eval/scripts/calibrate_router_divisor.py` prints a
+recommended value (the corpus minimum ratio times a safety factor);
+`llitmus-eval/tests/test_router_divisor_property.py` is the standing guard
+that the pinned value never underestimates. `test_routing.py` pins the
+constant itself, so changing it in loxo alone fails here and points at the
+recalibration path. The calibration is only valid for tokenizers that segment
+like the reference — cross-family variance (Qwen vs Llama vs Mistral) is far
+larger than the corpus variance it was fitted to — so switching the local
+model family means recalibrating.
+
+**Family drift.** The two halves of the gate are automated to different
+degrees: the limit follows the served model on its own, while the divisor is
+pinned by hand. Point the router at a different model family and the right
+side tracks reality while the left silently does not.
+`divisor_family_match()` compares the served model's `model_type` — from the
+same cached `config.json` the context tier reads, one bounded read, not two —
+against `ESTIMATE_DIVISOR_REF_MODEL_TYPE`, logs one non-fatal line at startup
+on a mismatch, and reports under `estimate_divisor` in `/health`:
+
+```json
+"estimate_divisor": {"chars_per_token": 3.39, "ref_model_type": "qwen3",
+                     "served_model_type": "llama", "family_match": false}
+```
+
+`family_match` is tri-state: `null` means undetermined (no repo configured,
+nothing in the cache, or a config without `model_type`) and is never reported
+as agreement. It reports only — it never adjusts the divisor or forces cloud.
+An estimate wrong by a family-sized factor is a recalibration job; silently
+compensating at request time would hide the drift this check exists to
+surface.
 
 **Transport fallback (narrow by design).** If a local-routed request fails
 at the transport level (connect refused/timeout, read error, or the local
@@ -185,7 +270,8 @@ model. Tiers may set `reasoning = "low|medium|high"`, mapped to OpenRouter's
 `reasoning.effort`; a client-sent `reasoning` wins, and OpenAI-style
 `reasoning_effort` is translated rather than dropped. `/v1/models` derives
 tier `context_length` from the live rate card (explicit `advertised_context`
-overrides; local-pinned tiers advertise the local limit) and advertises the
+overrides; local-pinned tiers advertise `effective_local_context()`, so the
+number clients see tracks the model actually being served) and advertises the
 cloud target's per-token rates as a ceiling; local non-streaming responses
 report `usage.cost: 0` (local streaming deliberately not rewritten).
 
@@ -196,7 +282,7 @@ report `usage.cost: 0` (local streaming deliberately not rewritten).
 | `POST /v1/chat/completions` | The proxy path described above |
 | `GET /v1/models` | Synthesized tier entries (with `context_length`) merged with both backends' live model lists |
 | `GET /v1/spend` | Accumulated cloud spend: total, per provider, per model, plus the rate-card snapshot |
-| `GET /health` | Config snapshot: backends, local models, vision policy, rate cards, spend summary |
+| `GET /health` | Config snapshot: backends, local models, `local_context_limit` + `local_context_source`, `estimate_divisor` (incl. `family_match`), vision policy, rate cards, spend summary |
 
 ## Auth
 

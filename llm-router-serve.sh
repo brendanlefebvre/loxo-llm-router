@@ -13,6 +13,19 @@ ENV_FILE="${LOXO_ENV_FILE:-$HOME/.config/loxo-llm-router/env}"
 if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 
 export TZ="${TZ:-UTC}"
+
+# Pin the HF cache to the internal SSD, mirroring ~/bin/mlx-vlm-serve.sh. The
+# router reads config.json from this cache to derive the local context limit
+# (effective_local_context, "hf-cache" tier). An interactive shell may export
+# HF_HOME=/Volumes/Sunburst/hf -- inheriting that is bad twice over: the volume
+# may be unmounted, so the derivation silently returns None and the limit falls
+# back to 60000 (ABOVE what the served model can process), and under launchd a
+# read beneath /Volumes blocks forever because the job has no Full Disk Access
+# and cannot prompt for it. To point the cache elsewhere deliberately, set
+# HF_HOME_OVERRIDE in the env file -- a plain HF_HOME exported there is
+# intentionally discarded by the assignment below, so it is NOT the knob.
+export HF_HOME="${HF_HOME_OVERRIDE:-$HOME/.cache/huggingface}"
+
 PYTHON="${PYTHON:-python3}"
 
 # Bare `python3` resolves against PATH, and a service manager's PATH is not your

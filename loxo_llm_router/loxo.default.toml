@@ -8,7 +8,13 @@ port = 9090
 local_base_url = "http://localhost:7979/v1"
 cloud_base_url = "https://openrouter.ai/api/v1"
 local_models = []                                  # set per-deployment via TOML or LOCAL_MODELS env
-local_context_limit = 60000
+# local_context_limit omitted on purpose -> derived at startup: the local
+# server's /models, else the served model's HF-cache config.json, else the
+# legacy 60000 (see LEGACY_CONTEXT_DEFAULT in __init__.py).
+# Pin it here (or via the LOCAL_CONTEXT_LIMIT env) when the server is serving
+# LESS than the model's native window -- mlx_lm.server does not report its
+# context in /models, so that cap is invisible to the derivation and an
+# explicit value is the only way to express it.
 cloud_default_model = "anthropic/claude-sonnet-4.6"
 
 # reasoning = "low" | "medium" | "high"  — maps to OpenRouter's reasoning.effort on cloud-bound requests (B2)
@@ -45,4 +51,6 @@ advertised_context = 1048576
 [tiers.local]
 routing = "local"
 vision = "local"
-# advertised_context omitted on purpose — the loader defaults it to local_context_limit
+# advertised_context omitted on purpose — derived at serve time from
+# effective_local_context() (explicit config > startup /models probe >
+# the served model's HF-cache config.json > legacy default).

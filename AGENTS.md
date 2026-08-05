@@ -2,7 +2,7 @@
 
 FastAPI proxy (`loxo_llm_router/`) that routes OpenAI-compatible requests to a
 local model server (:7979) or cloud (OpenRouter) based on intent heuristics.
-Tests: `pytest test_routing.py test_config.py` (63 tests).
+Tests: `pytest test_routing.py test_config.py` (72); `pytest` for all 227.
 
 ## Running / deploying
 
@@ -44,9 +44,25 @@ Add/retarget tiers by editing the `[tiers.*]` table.
    `auto` (`x-loxo-quality: best` or oversized prompt → `cloud_target`, else local).
 1. `model` matches a `local_models` entry → local
 2. `x-loxo-quality: best` header → cloud
-3. estimated prompt > `local_context_limit` tokens → cloud
+3. estimated prompt > the effective local context → cloud
 4. `model` contains `/` → cloud
 5. default → local
+
+Both sides of rule 3 are derived, not assumed — see "The context gate" in
+ARCHITECTURE.md. The estimate counts every field the chat template renders
+(`tool_calls`, `reasoning_content`, tool schemas — agentic clients send a lot
+of these) over a divisor calibrated in the companion `llitmus-eval` repo. The
+limit resolves explicit config > startup `/models` probe > the served model's
+HF-cache `config.json` > the legacy `60000`; `/health` reports which tier
+answered under `local_context_source`. Note the probe never fires on MLX
+(`mlx_lm.server`'s `/models` carries no context field), so `hf-cache` is the
+effective tier there — and a constrained MLX serving window is invisible to
+the chain and must be pinned as `local_context_limit` by hand. Changing
+`ESTIMATE_CHARS_PER_TOKEN`
+requires recalibrating — `test_routing.py` pins it and will fail if you don't.
+`/health`'s `estimate_divisor.family_match` flags the case where the limit has
+followed the served model to a new family but the divisor has not (`null` =
+undetermined, never "fine"); it reports only and never changes routing.
 
 Note: `x-loxo-quality: best` only affects the `auto` tier (rule 0 / rule 2). The
 pinned tiers (`fast`/`deep`/`local`) return before the header is read, so the
@@ -107,8 +123,12 @@ model declares vision logs a one-line shim-required self-check.
 
 ## Verification
 
-Unit tests: `pytest test_routing.py test_config.py` (63 tests). To verify manually:
+Unit tests: `pytest test_routing.py test_config.py` (72 tests); `pytest` runs
+the full suite (227). To verify manually:
 - `curl http://localhost:9090/v1/models` (or a chat completions POST)
+- `curl http://localhost:9090/health | jq '{local_context_limit, local_context_source, estimate_divisor}'`
+  — which tier the context gate resolved from, and whether the token estimate
+  is still calibrated for the model being served
 - `curl http://localhost:9090/v1/spend` — check cloud spend totals
 - Check process manager logs (stdout/stderr) for tracebacks.
 - `ROUTER_QUIET` defaults to off — per-request routing decisions log to stderr.

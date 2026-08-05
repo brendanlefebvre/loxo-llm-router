@@ -31,7 +31,9 @@ Configuration (env vars):
   CLOUD_BASE_URL         default https://openrouter.ai/api/v1
   OPENROUTER_API_KEY     required for cloud traffic
   LOCAL_MODELS           comma-separated, e.g. "qwen3.6-35b-a3b,qwen3-30b-a3b"
-  LOCAL_CONTEXT_LIMIT    default 60000 (tokens; ~240k chars)
+  LOCAL_CONTEXT_LIMIT    explicit override; else the local server's /models
+                         probed at startup, else the served model's HF-cache
+                         config.json, else legacy 60000
   CLOUD_DEFAULT_MODEL    default anthropic/claude-sonnet-4.6
 
   Configuration: see loxo.default.toml for the full schema. Precedence is
@@ -101,6 +103,7 @@ import itertools
 import json
 import os
 import pathlib
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -128,7 +131,17 @@ CLOUD_BASE_URL = _cfg.cloud_base_url
 OPENROUTER_API_KEY = _cfg.openrouter_api_key
 LOCAL_MODELS_ORDER = list(_cfg.local_models)
 LOCAL_MODELS = set(LOCAL_MODELS_ORDER)
-LOCAL_CONTEXT_LIMIT = _cfg.local_context_limit
+LOCAL_CONTEXT_LIMIT = _cfg.local_context_limit  # None unless explicitly set
+LEGACY_CONTEXT_DEFAULT = 60000
+_derived_local_context: int | None = None
+
+# Sentinel distinguishing "not computed yet" from "computed, found nothing"
+# (which is legitimately None) for the HF-cache tier below. The whole parsed
+# config is cached, not just the context: the model family is read from the
+# same file to check the token estimator's calibration (see
+# divisor_family_match), and a second read would double the timeout exposure.
+_HF_CONFIG_UNSET = object()
+_hf_derived_config: dict | None | object = _HF_CONFIG_UNSET
 CLOUD_DEFAULT_MODEL = _cfg.cloud_default_model
 QUIET = _cfg.quiet
 ROUTER_TOKEN = _cfg.router_token
@@ -141,6 +154,13 @@ AUTO_ID = f"{ROUTER_NS}/auto"
 DEEP_ID = f"{ROUTER_NS}/deep"
 LOCAL_TIER_ID = f"{ROUTER_NS}/local"
 LOCAL_CONNECT_TIMEOUT = float(os.environ.get("LOCAL_CONNECT_TIMEOUT", "5"))
+
+# Wall-clock bound on reading config.json from the HF cache. Not a performance
+# knob: a local read is sub-millisecond or it is pathological. It exists because
+# some filesystem states block instead of erroring -- macOS TCC waiting on a
+# consent prompt no launchd job can show, or an unreachable network mount in
+# uninterruptible sleep -- and neither raises, so try/except never fires.
+HF_CACHE_READ_TIMEOUT = 2.0
 
 
 def resolve_virtual(model_id: str) -> VirtualModel | None:
@@ -347,6 +367,213 @@ FALLBACK_ERRORS = (
 app = FastAPI()
 
 
+def _context_from_models_payload(payload) -> int | None:
+    """Smallest declared context among the local server's models
+    (context_length, vLLM's max_model_len). None when absent/garbage."""
+    vals = []
+    for m in (payload or {}).get("data", []) or []:
+        if not isinstance(m, dict):
+            continue
+        v = m.get("context_length") or m.get("max_model_len")
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+            vals.append(v)
+    return min(vals) if vals else None
+
+
+async def probe_local_context() -> None:
+    """One startup probe of the local backend's /models; cached for the
+    process lifetime. Failure caches None — a down local server must not
+    block requests (they fall back to the explicit/legacy limit)."""
+    global _derived_local_context
+    try:
+        async with httpx.AsyncClient(timeout=LOCAL_CONNECT_TIMEOUT) as client:
+            r = await client.get(f"{LOCAL_BASE_URL}/models")
+            _derived_local_context = _context_from_models_payload(r.json())
+    except Exception:  # noqa: BLE001 - any failure means "unknown", never a crash
+        _derived_local_context = None
+
+
+@app.on_event("startup")
+async def _startup_probe_local_context():
+    await probe_local_context()
+    _warn_on_divisor_family_mismatch()
+
+
+def _warn_on_divisor_family_mismatch() -> None:
+    """One startup line when the estimator's calibration family and the served
+    model's disagree. Non-fatal: the router still works, its prompt-size
+    estimate is just fitted to a different tokenizer, and only a human with
+    the corpus can fix that. Silence on None -- unknown is not a finding."""
+    if divisor_family_match() is False:
+        log(f"[router] token estimate is calibrated for "
+            f"{ESTIMATE_DIVISOR_REF_MODEL_TYPE!r} "
+            f"(ESTIMATE_CHARS_PER_TOKEN={ESTIMATE_CHARS_PER_TOKEN}) but the "
+            f"served model is {local_model_family()!r}; the context gate may "
+            f"mis-size prompts until the divisor is recalibrated")
+
+
+def _read_hf_cache_config(repo: str | None) -> dict | None:
+    """The served model's config.json, read directly from the local
+    HuggingFace hub cache.
+
+    Stdlib only: the router's interpreter has neither huggingface_hub nor
+    transformers installed (and must not gain them), so this reads the cache
+    layout by hand instead of calling try_to_load_from_cache():
+
+        {HF_HOME or ~/.cache/huggingface}/hub/models--{org}--{name}/snapshots/{rev}/config.json
+
+    Returns the parsed object so callers can take more than one fact from a
+    single read -- the context length and the model family both come from
+    here, and reading twice would double the timeout exposure below for a
+    file that is already open.
+
+    Any failure -- no repo, no cache dir, unreadable, malformed JSON --
+    returns None, never a default.
+    """
+    if not repo:
+        return None
+    hf_home = os.environ.get("HF_HOME") or str(pathlib.Path.home() / ".cache" / "huggingface")
+    model_dir_name = "models--" + repo.replace("/", "--")
+    snapshots_dir = pathlib.Path(hf_home) / "hub" / model_dir_name / "snapshots"
+    try:
+        revisions = sorted(p.name for p in snapshots_dir.iterdir() if p.is_dir())
+    except OSError:
+        return None
+    if not revisions:
+        return None
+    # Multiple snapshot revisions can coexist (e.g. mid-update); any is
+    # acceptable per the task spec, so pick deterministically: sorted last.
+    config_path = snapshots_dir / revisions[-1] / "config.json"
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return cfg if isinstance(cfg, dict) else None
+
+
+def _config_scopes(cfg: dict | None):
+    """cfg, then its text_config -- the two places a fact may live.
+
+    Multimodal repos (Qwen3.6 / gemma-4 / Qwen3-VL) nest the language-model
+    fields under ``text_config``; top level wins when both are present.
+    """
+    if not isinstance(cfg, dict):
+        return
+    for scope in (cfg, cfg.get("text_config") or {}):
+        if isinstance(scope, dict):
+            yield scope
+
+
+def _config_context(cfg: dict | None) -> int | None:
+    """``max_position_embeddings`` from a parsed config.json, or None.
+
+    Mirrors llitmus-eval's resolve_context_length() (litmus_common.py) so the
+    two repos agree: a value only counts if it's an int (bool is an int
+    subclass -- True must not resolve to 1) and > 0.
+    """
+    for scope in _config_scopes(cfg):
+        v = scope.get("max_position_embeddings")
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+            return v
+    return None
+
+
+def _config_model_type(cfg: dict | None) -> str | None:
+    """``model_type`` from a parsed config.json ("qwen3", "llama", "gemma3"),
+    or None when absent or not a string. Used only to check the token
+    estimator's calibration against the model actually being served --
+    never to route."""
+    for scope in _config_scopes(cfg):
+        v = scope.get("model_type")
+        if isinstance(v, str) and v.strip():
+            return v.strip().lower()
+    return None
+
+
+def _hf_cache_config(repo: str | None) -> dict | None:
+    """_read_hf_cache_config() bounded by HF_CACHE_READ_TIMEOUT.
+
+    A hang is treated exactly like a cache miss: return None and let the
+    caller fall through the precedence chain. The read runs in a worker
+    thread because a thread stuck in a syscall cannot be killed -- so it is
+    abandoned rather than joined, and daemon=True keeps the abandoned thread
+    from holding up interpreter exit. At most one such thread can leak per
+    process, since _cached_hf_local_config() calls this once.
+    """
+    box: dict[str, dict | None] = {}
+
+    def _worker() -> None:
+        try:
+            box["v"] = _read_hf_cache_config(repo)
+        except Exception as e:  # noqa: BLE001 - a miss, never a crashed request
+            # _read_hf_cache_config already folds OSError/ValueError into None,
+            # so reaching here is unexpected. Log it: the fall-through lands on
+            # LEGACY_CONTEXT_DEFAULT, which can exceed what the served model
+            # accepts, and the timeout branch below is already loud.
+            log(f"[router] HF cache read for {repo!r} raised "
+                f"{type(e).__name__}: {e}; treating as unresolved")
+
+    t = threading.Thread(target=_worker, name="hf-cache-read", daemon=True)
+    t.start()
+    t.join(HF_CACHE_READ_TIMEOUT)
+    if t.is_alive():
+        log(f"[router] HF cache read for {repo!r} exceeded "
+            f"{HF_CACHE_READ_TIMEOUT}s; treating as unresolved")
+        return None
+    return box.get("v")
+
+
+def _cached_hf_local_config() -> dict | None:
+    """_hf_cache_config() for LOCAL_MODELS_ORDER[0], computed once per
+    process rather than per call. effective_local_context() sits on the hot
+    routing path, so this must not stat the filesystem on every request."""
+    global _hf_derived_config
+    if _hf_derived_config is _HF_CONFIG_UNSET:
+        repo = LOCAL_MODELS_ORDER[0] if LOCAL_MODELS_ORDER else None
+        _hf_derived_config = _hf_cache_config(repo)
+    return _hf_derived_config
+
+
+def _cached_hf_local_context() -> int | None:
+    """Native context length of the served model, from the cached config."""
+    return _config_context(_cached_hf_local_config())
+
+
+def local_model_family() -> str | None:
+    """``model_type`` of the served model, or None when it can't be
+    determined -- no repo configured, nothing in the HF cache, or a config
+    without the key. None means unknown, never "no mismatch"."""
+    return _config_model_type(_cached_hf_local_config())
+
+
+def effective_local_context() -> int:
+    """Routing threshold precedence: explicit config > startup probe > HF
+    cache (served model's native context) > legacy default. Explicit stays
+    first so operators (and tests monkeypatching LOCAL_CONTEXT_LIMIT) keep a
+    working override. Probe outranks the HF cache because a probe reflects
+    the actual serving configuration -- e.g. vLLM started with a reduced
+    --max-model-len -- while the cache only knows the model's native ceiling."""
+    return resolve_local_context()[0]
+
+
+def resolve_local_context() -> tuple[int, str]:
+    """The effective limit and the tier that produced it, from one place.
+
+    /health reports the source beside the limit and AGENTS.md tells operators
+    to trust that field, so the two must never disagree. Restating the chain
+    at the reporting site is how they drift.
+    """
+    if LOCAL_CONTEXT_LIMIT is not None:
+        return LOCAL_CONTEXT_LIMIT, "config-explicit"
+    if _derived_local_context is not None:
+        return _derived_local_context, "probe"
+    hf_context = _cached_hf_local_context()
+    if hf_context is not None:
+        return hf_context, "hf-cache"
+    return LEGACY_CONTEXT_DEFAULT, "legacy-default"
+
+
 def log(msg: str) -> None:
     if not QUIET:
         print(f"{_ts()} {msg}", flush=True)
@@ -439,12 +666,77 @@ def auth_failed(authorization: str | None) -> Response | None:
     return None
 
 
-def estimate_prompt_tokens(body: dict[str, Any]) -> int:
-    """~4 chars per token is a good English approximation; fine for threshold gating.
+# The tokenizer the divisor below was calibrated against. Named here because
+# the calibration is only valid for tokenizers that segment like this one:
+# cross-family variance (Qwen vs Llama vs Mistral) is far larger than the
+# corpus variance the divisor was fitted to.
+ESTIMATE_DIVISOR_REF_TOKENIZER = "mlx-community/Qwen3-14B-4bit"
 
-    Counts message content AND tool/function/system schemas — agentic clients
-    (OpenCode) send large tool definitions that can dominate the real prompt size.
+# config.json ``model_type`` of the tokenizer above. Compared against the
+# served model's own model_type to detect that the estimator is calibrated
+# for a family the router is no longer serving -- see divisor_family_match().
+ESTIMATE_DIVISOR_REF_MODEL_TYPE = "qwen3"
+
+# Chars-per-token divisor for estimate_prompt_tokens. Calibrated against
+# ESTIMATE_DIVISOR_REF_TOKENIZER over the 15-case main replay corpus
+# (cases/main_replay.jsonl) on 2026-08-05 by
+# llitmus-eval/scripts/calibrate_router_divisor.py: min(chars/ref_tokens)
+# over the corpus, times a deliberate safety factor, floored to 2 decimals.
+# Margins at this value: worst under +5.4%, worst over +26.1%.
+#
+# The safety factor is load-bearing: min() over 15 cases is an EMPIRICAL
+# MINIMUM, not a bound. Without it the pinned value sits at the edge of the
+# observed data (worst under +0.1%), so any traffic denser than the densest
+# case ever seen would underestimate. The margin buys headroom on the cheap
+# side of the asymmetry documented in estimate_prompt_tokens.
+#
+# Recalibrate if the corpus changes OR the local model family changes. Note
+# that BOTH the corpus and the guard live in the companion llitmus-eval repo,
+# not here -- this interpreter has no transformers/huggingface_hub and must
+# not gain them, so the evidence for this number is necessarily out-of-tree:
+#
+#   llitmus-eval/scripts/calibrate_router_divisor.py   recomputes the value
+#   llitmus-eval/tests/test_router_divisor_property.py fails if it underestimates
+#
+# Because that repo has no CI, the only in-tree tripwire is
+# test_estimate_divisor_is_pinned in test_routing.py: it asserts the literal
+# below, so editing it here alone fails a test that names the recalibration
+# path. That is a "you changed it deliberately" check, NOT a correctness one --
+# only the property test above can tell you the new value is safe.
+ESTIMATE_CHARS_PER_TOKEN = 3.39
+
+
+def divisor_family_match() -> bool | None:
+    """Is the token estimator calibrated for the model actually being served?
+
+    Closes an asymmetry this router would otherwise carry: the right side of
+    the context gate (effective_local_context) follows the served model
+    automatically, while the left side (ESTIMATE_CHARS_PER_TOKEN) is pinned by
+    hand to one tokenizer family. Serve a llama or gemma and the limit tracks
+    reality while the estimate silently does not -- cross-family segmentation
+    variance is far larger than the corpus variance the divisor was fitted to.
+
+    Reports only; never routes. An estimate that is wrong by a family-sized
+    factor is a recalibration job, not something to paper over at request time
+    by inflating the divisor or forcing traffic to cloud.
+
+    Tri-state on purpose:
+        True   families agree
+        False  they do not -- recalibrate (see ESTIMATE_CHARS_PER_TOKEN)
+        None   undetermined: no repo configured, nothing in the HF cache, or a
+               config.json without model_type. Never report None as agreement.
     """
+    family = local_model_family()
+    if family is None:
+        return None
+    return family == ESTIMATE_DIVISOR_REF_MODEL_TYPE
+
+
+def _count_prompt_chars(body: dict[str, Any]) -> int:
+    """Characters of every request field the chat template renders into the
+    prompt — not just content text. On agentic traffic (OpenCode),
+    tool_calls/reasoning_content/tool_call_id dominated real prompt size
+    (87% of mr-012) and were previously counted as zero."""
     total = 0
     for m in body.get("messages", []):
         content = m.get("content")
@@ -454,10 +746,25 @@ def estimate_prompt_tokens(body: dict[str, Any]) -> int:
             for part in content:
                 if isinstance(part, dict) and part.get("type") == "text":
                     total += len(part.get("text", ""))
+        for key in ("reasoning_content", "tool_call_id", "name"):
+            v = m.get(key)
+            if isinstance(v, str):
+                total += len(v)
+        if m.get("tool_calls"):
+            total += len(json.dumps(m["tool_calls"]))
     for key in ("tools", "functions"):
         if key in body:
             total += len(json.dumps(body[key]))
-    return total // 4
+    return total
+
+
+def estimate_prompt_tokens(body: dict[str, Any]) -> int:
+    """Conservative token estimate for threshold gating: full-field char
+    count over a divisor calibrated to never underestimate on the eval
+    corpus. Asymmetric failure modes drive the conservatism: an undercount
+    sends an over-long prompt to a local model (garbage or a crash); an
+    overcount sends it to cloud (costs money, works)."""
+    return int(_count_prompt_chars(body) / ESTIMATE_CHARS_PER_TOKEN)
 
 
 def is_local_model(model_name: str) -> bool:
@@ -692,7 +999,7 @@ def pick_target(body: dict[str, Any], quality_header: str | None) -> tuple[str, 
         # routing == "auto"
         if (quality_header or "").lower() == "best":
             return CLOUD_BASE_URL, vm.cloud_target, "virtual-quality-best"
-        if estimate_prompt_tokens(body) > LOCAL_CONTEXT_LIMIT:
+        if estimate_prompt_tokens(body) > effective_local_context():
             return CLOUD_BASE_URL, vm.cloud_target, "virtual-prompt-too-long"
         return LOCAL_BASE_URL, local_target_for(vm, model), "virtual-local"
 
@@ -702,7 +1009,7 @@ def pick_target(body: dict[str, Any], quality_header: str | None) -> tuple[str, 
     if (quality_header or "").lower() == "best":
         return CLOUD_BASE_URL, model or CLOUD_DEFAULT_MODEL, "quality-best"
 
-    if estimate_prompt_tokens(body) > LOCAL_CONTEXT_LIMIT:
+    if estimate_prompt_tokens(body) > effective_local_context():
         return CLOUD_BASE_URL, model or CLOUD_DEFAULT_MODEL, "prompt-too-long"
 
     if "/" in model:
@@ -733,10 +1040,11 @@ async def _local_pin_preflight(
     if not (vm and vm.routing == "local"):
         return None
     n = estimate_prompt_tokens(body)
-    if n > LOCAL_CONTEXT_LIMIT:
+    limit = effective_local_context()
+    if n > limit:
         return JSONResponse(status_code=422, content={"error": {
             "message": (f"prompt is too large for local context "
-                        f"(~{n} tokens > {LOCAL_CONTEXT_LIMIT}); "
+                        f"(~{n} tokens > {limit}); "
                         f"switch to {AUTO_ID} or {DEEP_ID}"),
             "type": "invalid_request_error", "code": "local_context_exceeded"}})
     try:
@@ -1137,7 +1445,7 @@ def _virtual_model_entries(cards: dict[str, dict[str, Any]]) -> list[dict[str, A
         if vm.advertised_context is not None:
             ctx = vm.advertised_context
         elif vm.routing == "local":
-            ctx = LOCAL_CONTEXT_LIMIT
+            ctx = effective_local_context()
         elif card and card.get("context_length"):
             ctx = card["context_length"]
         else:
@@ -1203,6 +1511,7 @@ async def spend(authorization: str | None = Header(default=None)):
 
 @app.get("/health")
 async def health():
+    _local_limit, _local_source = resolve_local_context()
     cards = _rate_cards_snapshot_and_maybe_refresh()
     data = await SPEND.snapshot()
     spend_summary = {k: data[k] for k in ("total_usd", "requests", "since")}
@@ -1211,7 +1520,17 @@ async def health():
         "local": LOCAL_BASE_URL,
         "cloud": CLOUD_BASE_URL,
         "local_models": sorted(LOCAL_MODELS),
-        "local_context_limit": LOCAL_CONTEXT_LIMIT,
+        "local_context_limit": _local_limit,
+        "local_context_source": _local_source,
+        # The other side of the same gate: which model the prompt-size
+        # estimate is calibrated for, versus which one is actually served.
+        "estimate_divisor": {
+            "chars_per_token": ESTIMATE_CHARS_PER_TOKEN,
+            "ref_tokenizer": ESTIMATE_DIVISOR_REF_TOKENIZER,
+            "ref_model_type": ESTIMATE_DIVISOR_REF_MODEL_TYPE,
+            "served_model_type": local_model_family(),
+            "family_match": divisor_family_match(),
+        },
         "local_connect_timeout": LOCAL_CONNECT_TIMEOUT,
         "vision": {
             "enabled": bool(VISION_SHIM_MODEL or VISION_CLOUD_MODEL),
