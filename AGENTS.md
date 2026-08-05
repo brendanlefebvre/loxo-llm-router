@@ -70,8 +70,10 @@ header is a no-op on them — pick the tier directly (e.g. `loxo/deep`) instead.
 
 If local is chosen but the connection fails/times out (`LOCAL_CONNECT_TIMEOUT`,
 default 5s), the request is re-sent to cloud with `cloud_default_model`. This
-is a transport fallback only, not a quality fallback, and only works for
-streaming before the first byte is sent. A non-transport upstream error (e.g.
+is a transport fallback only, not a quality fallback. It applies on both the
+streaming and non-streaming paths; on the streaming path it can only fire
+before the first byte is sent (a partially-sent stream cannot be restarted).
+A non-transport upstream error (e.g.
 402/429/5xx) is never masked: streamed responses surface the real status instead
 of a blank HTTP 200.
 

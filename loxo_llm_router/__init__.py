@@ -30,7 +30,10 @@ Configuration (env vars):
   LOCAL_BASE_URL         e.g. http://localhost:7979/v1
   CLOUD_BASE_URL         default https://openrouter.ai/api/v1
   OPENROUTER_API_KEY     required for cloud traffic
-  LOCAL_MODELS           comma-separated, e.g. "qwen3.6-35b-a3b,qwen3-30b-a3b"
+  LOCAL_MODELS           comma-separated FULL HF repo IDs, e.g.
+                         "mlx-community/Qwen3-14B-4bit" — the first entry is
+                         sent verbatim as the served model id, and mlx
+                         backends reject short aliases
   LOCAL_CONTEXT_LIMIT    explicit override; else the local server's /models
                          probed at startup, else the served model's HF-cache
                          config.json, else legacy 60000
