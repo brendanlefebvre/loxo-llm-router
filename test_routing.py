@@ -154,7 +154,7 @@ def test_estimate_divisor_is_pinned():
     here alone fails in the repo that *does* run CI, and the failure names
     where to go.
     """
-    assert R.ESTIMATE_CHARS_PER_TOKEN == 3.5, (
+    assert R.ESTIMATE_CHARS_PER_TOKEN == 3.39, (
         "ESTIMATE_CHARS_PER_TOKEN changed. This test does not know whether "
         "the new value is safe — only the corpus does. Re-run "
         "llitmus-eval/scripts/calibrate_router_divisor.py, confirm "

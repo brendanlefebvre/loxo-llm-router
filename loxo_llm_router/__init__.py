@@ -663,13 +663,14 @@ ESTIMATE_DIVISOR_REF_MODEL_TYPE = "qwen3"
 
 # Chars-per-token divisor for estimate_prompt_tokens. Calibrated against
 # ESTIMATE_DIVISOR_REF_TOKENIZER over the 15-case main replay corpus
-# (cases/main_replay.jsonl) on 2026-07-29 by
+# (cases/main_replay.jsonl) on 2026-08-05 by
 # llitmus-eval/scripts/calibrate_router_divisor.py: min(chars/ref_tokens)
 # over the corpus, times a deliberate safety factor, floored to 2 decimals.
+# Margins at this value: worst under +5.4%, worst over +26.1%.
 #
 # The safety factor is load-bearing: min() over 15 cases is an EMPIRICAL
 # MINIMUM, not a bound. Without it the pinned value sits at the edge of the
-# observed data (worst under +0.2%), so any traffic denser than the densest
+# observed data (worst under +0.1%), so any traffic denser than the densest
 # case ever seen would underestimate. The margin buys headroom on the cheap
 # side of the asymmetry documented in estimate_prompt_tokens.
 #
@@ -686,10 +687,7 @@ ESTIMATE_DIVISOR_REF_MODEL_TYPE = "qwen3"
 # below, so editing it here alone fails a test that names the recalibration
 # path. That is a "you changed it deliberately" check, NOT a correctness one --
 # only the property test above can tell you the new value is safe.
-#
-# The value close to Qwen3.6's version number is pure coincidence — this is an
-# empirical chars-per-token ratio, not model-derived.
-ESTIMATE_CHARS_PER_TOKEN = 3.5
+ESTIMATE_CHARS_PER_TOKEN = 3.39
 
 
 def divisor_family_match() -> bool | None:
