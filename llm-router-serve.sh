@@ -21,7 +21,9 @@ export TZ="${TZ:-UTC}"
 # may be unmounted, so the derivation silently returns None and the limit falls
 # back to 60000 (ABOVE what the served model can process), and under launchd a
 # read beneath /Volumes blocks forever because the job has no Full Disk Access
-# and cannot prompt for it. Set HF_HOME in the env file to override deliberately.
+# and cannot prompt for it. To point the cache elsewhere deliberately, set
+# HF_HOME_OVERRIDE in the env file -- a plain HF_HOME exported there is
+# intentionally discarded by the assignment below, so it is NOT the knob.
 export HF_HOME="${HF_HOME_OVERRIDE:-$HOME/.cache/huggingface}"
 
 PYTHON="${PYTHON:-python3}"

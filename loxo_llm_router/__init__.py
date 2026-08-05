@@ -31,8 +31,9 @@ Configuration (env vars):
   CLOUD_BASE_URL         default https://openrouter.ai/api/v1
   OPENROUTER_API_KEY     required for cloud traffic
   LOCAL_MODELS           comma-separated, e.g. "qwen3.6-35b-a3b,qwen3-30b-a3b"
-  LOCAL_CONTEXT_LIMIT    explicit override (else probed from the local
-                         server's /models at startup, else legacy 60000)
+  LOCAL_CONTEXT_LIMIT    explicit override; else the local server's /models
+                         probed at startup, else the served model's HF-cache
+                         config.json, else legacy 60000
   CLOUD_DEFAULT_MODEL    default anthropic/claude-sonnet-4.6
 
   Configuration: see loxo.default.toml for the full schema. Precedence is
@@ -140,7 +141,7 @@ _derived_local_context: int | None = None
 # same file to check the token estimator's calibration (see
 # divisor_family_match), and a second read would double the timeout exposure.
 _HF_CONFIG_UNSET = object()
-_hf_derived_config: dict | None = _HF_CONFIG_UNSET
+_hf_derived_config: dict | None | object = _HF_CONFIG_UNSET
 CLOUD_DEFAULT_MODEL = _cfg.cloud_default_model
 QUIET = _cfg.quiet
 ROUTER_TOKEN = _cfg.router_token
@@ -505,8 +506,13 @@ def _hf_cache_config(repo: str | None) -> dict | None:
     def _worker() -> None:
         try:
             box["v"] = _read_hf_cache_config(repo)
-        except Exception:  # noqa: BLE001 - a miss, never a crashed request
-            pass
+        except Exception as e:  # noqa: BLE001 - a miss, never a crashed request
+            # _read_hf_cache_config already folds OSError/ValueError into None,
+            # so reaching here is unexpected. Log it: the fall-through lands on
+            # LEGACY_CONTEXT_DEFAULT, which can exceed what the served model
+            # accepts, and the timeout branch below is already loud.
+            log(f"[router] HF cache read for {repo!r} raised "
+                f"{type(e).__name__}: {e}; treating as unresolved")
 
     t = threading.Thread(target=_worker, name="hf-cache-read", daemon=True)
     t.start()
@@ -548,14 +554,24 @@ def effective_local_context() -> int:
     working override. Probe outranks the HF cache because a probe reflects
     the actual serving configuration -- e.g. vLLM started with a reduced
     --max-model-len -- while the cache only knows the model's native ceiling."""
+    return resolve_local_context()[0]
+
+
+def resolve_local_context() -> tuple[int, str]:
+    """The effective limit and the tier that produced it, from one place.
+
+    /health reports the source beside the limit and AGENTS.md tells operators
+    to trust that field, so the two must never disagree. Restating the chain
+    at the reporting site is how they drift.
+    """
     if LOCAL_CONTEXT_LIMIT is not None:
-        return LOCAL_CONTEXT_LIMIT
+        return LOCAL_CONTEXT_LIMIT, "config-explicit"
     if _derived_local_context is not None:
-        return _derived_local_context
+        return _derived_local_context, "probe"
     hf_context = _cached_hf_local_context()
     if hf_context is not None:
-        return hf_context
-    return LEGACY_CONTEXT_DEFAULT
+        return hf_context, "hf-cache"
+    return LEGACY_CONTEXT_DEFAULT, "legacy-default"
 
 
 def log(msg: str) -> None:
@@ -1495,6 +1511,7 @@ async def spend(authorization: str | None = Header(default=None)):
 
 @app.get("/health")
 async def health():
+    _local_limit, _local_source = resolve_local_context()
     cards = _rate_cards_snapshot_and_maybe_refresh()
     data = await SPEND.snapshot()
     spend_summary = {k: data[k] for k in ("total_usd", "requests", "since")}
@@ -1503,11 +1520,8 @@ async def health():
         "local": LOCAL_BASE_URL,
         "cloud": CLOUD_BASE_URL,
         "local_models": sorted(LOCAL_MODELS),
-        "local_context_limit": effective_local_context(),
-        "local_context_source": ("config-explicit" if LOCAL_CONTEXT_LIMIT is not None
-                                  else "probe" if _derived_local_context is not None
-                                  else "hf-cache" if _cached_hf_local_context() is not None
-                                  else "legacy-default"),
+        "local_context_limit": _local_limit,
+        "local_context_source": _local_source,
         # The other side of the same gate: which model the prompt-size
         # estimate is calibrated for, versus which one is actually served.
         "estimate_divisor": {

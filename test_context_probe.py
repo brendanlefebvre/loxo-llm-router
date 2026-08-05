@@ -442,9 +442,59 @@ def test_no_startup_line_when_family_matches_or_is_unknown(monkeypatch, capsys):
 
 def test_health_reports_the_divisor_and_the_served_family(monkeypatch):
     _serve_config(monkeypatch, {"model_type": "llama"})
+    # Entering TestClient fires the startup probe; without this stub it opens a
+    # real connection to LOCAL_BASE_URL/models and the result depends on
+    # whether a local server happens to be up (see the note at the top of the
+    # startup-hook section).
+    monkeypatch.setattr(R.httpx, "AsyncClient", _Boom)
     with TestClient(R.app) as client:
         block = client.get("/health").json()["estimate_divisor"]
     assert block["chars_per_token"] == R.ESTIMATE_CHARS_PER_TOKEN
     assert block["ref_tokenizer"] == R.ESTIMATE_DIVISOR_REF_TOKENIZER
     assert block["served_model_type"] == "llama"
     assert block["family_match"] is False
+
+
+# --- limit and reported source come from one resolver -------------------------
+
+def _pin_tiers(monkeypatch, explicit, probe, hf):
+    monkeypatch.setattr(R, "LOCAL_CONTEXT_LIMIT", explicit)
+    monkeypatch.setattr(R, "_derived_local_context", probe)
+    monkeypatch.setattr(R, "_hf_derived_config", hf)
+
+
+def test_resolve_local_context_reports_the_tier_that_answered(monkeypatch):
+    hf = {"max_position_embeddings": 40960}
+    for explicit, probe, cache, expected in [
+        (999, 8888, hf, (999, "config-explicit")),
+        (None, 8888, hf, (8888, "probe")),
+        (None, None, hf, (40960, "hf-cache")),
+        (None, None, None, (R.LEGACY_CONTEXT_DEFAULT, "legacy-default")),
+    ]:
+        _pin_tiers(monkeypatch, explicit, probe, cache)
+        assert R.resolve_local_context() == expected
+        # the limit callers route on must be the one the source describes
+        assert R.effective_local_context() == expected[0]
+
+
+def test_health_source_cannot_drift_from_its_limit(monkeypatch):
+    """/health reports the source beside the limit and AGENTS.md tells
+    operators to trust that field, so the two must agree at every tier."""
+    # The startup hook re-runs probe_local_context() and would overwrite the
+    # pinned _derived_local_context, so neutralize the probe rather than the
+    # transport: this test is about the reporting path, not the probe.
+    async def _no_probe():
+        pass
+    monkeypatch.setattr(R, "probe_local_context", _no_probe)
+    for explicit, probe, cache in [
+        (999, 8888, {"max_position_embeddings": 40960}),
+        (None, 8888, {"max_position_embeddings": 40960}),
+        (None, None, {"max_position_embeddings": 40960}),
+        (None, None, None),
+    ]:
+        _pin_tiers(monkeypatch, explicit, probe, cache)
+        expected_limit, expected_source = R.resolve_local_context()
+        with TestClient(R.app) as client:
+            h = client.get("/health").json()
+        assert (h["local_context_limit"], h["local_context_source"]) == (
+            expected_limit, expected_source)

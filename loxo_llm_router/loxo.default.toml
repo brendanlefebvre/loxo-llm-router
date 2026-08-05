@@ -52,4 +52,5 @@ advertised_context = 1048576
 routing = "local"
 vision = "local"
 # advertised_context omitted on purpose — derived at serve time from
-# effective_local_context() (explicit config > startup probe > legacy default).
+# effective_local_context() (explicit config > startup /models probe >
+# the served model's HF-cache config.json > legacy default).

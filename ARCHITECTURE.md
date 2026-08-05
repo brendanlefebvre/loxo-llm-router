@@ -164,7 +164,7 @@ against `ESTIMATE_DIVISOR_REF_MODEL_TYPE`, logs one non-fatal line at startup
 on a mismatch, and reports under `estimate_divisor` in `/health`:
 
 ```json
-"estimate_divisor": {"chars_per_token": 3.5, "ref_model_type": "qwen3",
+"estimate_divisor": {"chars_per_token": 3.39, "ref_model_type": "qwen3",
                      "served_model_type": "llama", "family_match": false}
 ```
 
