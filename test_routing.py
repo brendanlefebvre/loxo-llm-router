@@ -142,6 +142,32 @@ def test_count_prompt_chars_is_divisor_free():
     assert R._count_prompt_chars(body) == 36
 
 
+def test_estimate_divisor_is_pinned():
+    """Tripwire, not a correctness check.
+
+    Every other estimator test derives its expectation from
+    ESTIMATE_CHARS_PER_TOKEN, so they pass at any value — including one that
+    underestimates and ships over-long prompts to a local model. The real
+    guard (llitmus-eval/tests/test_router_divisor_property.py) needs the
+    corpus and a reference tokenizer that cannot live in this interpreter,
+    and its repo has no CI. So this pins the literal: changing the divisor
+    here alone fails in the repo that *does* run CI, and the failure names
+    where to go.
+    """
+    assert R.ESTIMATE_CHARS_PER_TOKEN == 3.5, (
+        "ESTIMATE_CHARS_PER_TOKEN changed. This test does not know whether "
+        "the new value is safe — only the corpus does. Re-run "
+        "llitmus-eval/scripts/calibrate_router_divisor.py, confirm "
+        "llitmus-eval/tests/test_router_divisor_property.py passes with a "
+        "non-zero case count, then update this pin to match."
+    )
+    assert R.ESTIMATE_DIVISOR_REF_TOKENIZER == "mlx-community/Qwen3-14B-4bit", (
+        "the reference tokenizer changed — the divisor is only valid for "
+        "tokenizers that segment like the one it was fitted against; "
+        "recalibrate before repinning"
+    )
+
+
 # --- is_local_model -----------------------------------------------------------
 
 def test_is_local_model_substring_match():
