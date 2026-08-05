@@ -13,7 +13,11 @@ port = 9090
 local_base_url = "http://localhost:7979/v1"   # MLX / Ollama / llama.cpp / vLLM / LM Studio
 cloud_base_url = "https://openrouter.ai/api/v1"
 local_models = ["mlx-community/Qwen3.6-35B-A3B-4bit"]   # first entry = default local target
-local_context_limit = 60000
+# local_context_limit: omit to derive it (local /models probe -> the served
+# model's HF-cache config.json -> legacy 60000). Set it only to cap BELOW
+# the model's native window -- mlx_lm.server does not report its serving
+# context, so the derivation cannot see such a cap.
+# local_context_limit = 32768
 cloud_default_model = "anthropic/claude-sonnet-4.6"
 
 # Each [tiers.<key>] becomes the virtual id "<namespace>/<key>".
@@ -51,4 +55,4 @@ advertised_context = 1048576
 [tiers.local]
 routing = "local"            # pinned local, hard-fail (no cloud fallback)
 vision = "local"
-# advertised_context omitted → defaults to local_context_limit
+# advertised_context omitted → defaults to the effective local context

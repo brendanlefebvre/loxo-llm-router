@@ -111,13 +111,28 @@ precedence order, and `/health` reports which tier answered under
 | Source | Where it comes from |
 |---|---|
 | `config-explicit` | `LOCAL_CONTEXT_LIMIT` env or `local_context_limit` in TOML — an operator override, always wins |
-| `probe` | The local backend's `/models`, read once at startup (`context_length` / vLLM's `max_model_len`); smallest wins |
-| `hf-cache` | `max_position_embeddings` from the served model's `config.json` in the local HuggingFace cache |
+| `probe` | The local backend's `/models`, read once at startup (`context_length` / vLLM's `max_model_len`); smallest wins. **vLLM-style backends only — see below** |
+| `hf-cache` | `max_position_embeddings` from the served model's `config.json` in the local HuggingFace cache. The effective tier on MLX |
 | `legacy-default` | `60000` — the historical hardcoded value, now only a last resort |
 
 The probe outranks the cache because it reflects the *serving* configuration
 (vLLM started with a reduced `--max-model-len`), while the cache only knows
-the model's native ceiling. Every derivation fails closed to the next tier:
+the model's native ceiling.
+
+**On MLX the probe never fires.** `mlx_lm.server`'s `/models` returns only
+`id`/`object`/`created` — no context field of any kind — so the probe
+resolves `None` on every startup and `hf-cache` answers. This is by the
+server's design, not a transient failure, and it has a consequence worth
+stating plainly: **a constrained MLX serving window is invisible to the
+router.** The cache reports the model's native ceiling and nothing in the
+chain can learn that the server was started with less. Where vLLM would
+self-report a reduced `--max-model-len`, MLX cannot, so any serving-side cap
+(KV-cache limits, memory headroom on the box) has to be pinned by hand as
+`local_context_limit` / `LOCAL_CONTEXT_LIMIT`. On an MLX deployment an
+explicit limit is not redundant with the derivation — it is the only way to
+express something the derivation cannot see.
+
+Every derivation fails closed to the next tier:
 an unreachable backend, an unmounted cache volume, or malformed JSON yields
 `None`, never a wrong number. The cache read is bounded by
 `HF_CACHE_READ_TIMEOUT` because some filesystem states block instead of

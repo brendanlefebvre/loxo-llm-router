@@ -54,7 +54,11 @@ ARCHITECTURE.md. The estimate counts every field the chat template renders
 of these) over a divisor calibrated in the companion `llitmus-eval` repo. The
 limit resolves explicit config > startup `/models` probe > the served model's
 HF-cache `config.json` > the legacy `60000`; `/health` reports which tier
-answered under `local_context_source`. Changing `ESTIMATE_CHARS_PER_TOKEN`
+answered under `local_context_source`. Note the probe never fires on MLX
+(`mlx_lm.server`'s `/models` carries no context field), so `hf-cache` is the
+effective tier there — and a constrained MLX serving window is invisible to
+the chain and must be pinned as `local_context_limit` by hand. Changing
+`ESTIMATE_CHARS_PER_TOKEN`
 requires recalibrating — `test_routing.py` pins it and will fail if you don't.
 `/health`'s `estimate_divisor.family_match` flags the case where the limit has
 followed the served model to a new family but the divisor has not (`null` =
