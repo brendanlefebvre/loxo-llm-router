@@ -135,9 +135,12 @@ LEGACY_CONTEXT_DEFAULT = 60000
 _derived_local_context: int | None = None
 
 # Sentinel distinguishing "not computed yet" from "computed, found nothing"
-# (which is legitimately None) for the HF-cache tier below.
-_HF_CONTEXT_UNSET = object()
-_hf_derived_context: int | None = _HF_CONTEXT_UNSET
+# (which is legitimately None) for the HF-cache tier below. The whole parsed
+# config is cached, not just the context: the model family is read from the
+# same file to check the token estimator's calibration (see
+# divisor_family_match), and a second read would double the timeout exposure.
+_HF_CONFIG_UNSET = object()
+_hf_derived_config: dict | None = _HF_CONFIG_UNSET
 CLOUD_DEFAULT_MODEL = _cfg.cloud_default_model
 QUIET = _cfg.quiet
 ROUTER_TOKEN = _cfg.router_token
@@ -392,11 +395,25 @@ async def probe_local_context() -> None:
 @app.on_event("startup")
 async def _startup_probe_local_context():
     await probe_local_context()
+    _warn_on_divisor_family_mismatch()
 
 
-def _read_hf_cache_context(repo: str | None) -> int | None:
-    """Native context length for a model repo, read directly from the local
-    HuggingFace hub cache's config.json.
+def _warn_on_divisor_family_mismatch() -> None:
+    """One startup line when the estimator's calibration family and the served
+    model's disagree. Non-fatal: the router still works, its prompt-size
+    estimate is just fitted to a different tokenizer, and only a human with
+    the corpus can fix that. Silence on None -- unknown is not a finding."""
+    if divisor_family_match() is False:
+        log(f"[router] token estimate is calibrated for "
+            f"{ESTIMATE_DIVISOR_REF_MODEL_TYPE!r} "
+            f"(ESTIMATE_CHARS_PER_TOKEN={ESTIMATE_CHARS_PER_TOKEN}) but the "
+            f"served model is {local_model_family()!r}; the context gate may "
+            f"mis-size prompts until the divisor is recalibrated")
+
+
+def _read_hf_cache_config(repo: str | None) -> dict | None:
+    """The served model's config.json, read directly from the local
+    HuggingFace hub cache.
 
     Stdlib only: the router's interpreter has neither huggingface_hub nor
     transformers installed (and must not gain them), so this reads the cache
@@ -404,12 +421,13 @@ def _read_hf_cache_context(repo: str | None) -> int | None:
 
         {HF_HOME or ~/.cache/huggingface}/hub/models--{org}--{name}/snapshots/{rev}/config.json
 
-    Mirrors llitmus-eval's resolve_context_length() (litmus_common.py) so the
-    two repos agree: top-level ``max_position_embeddings`` wins, then
-    ``text_config.max_position_embeddings`` (Qwen3.6 / gemma-4 / Qwen3-VL nest
-    it there); a value only counts if it's an int (bool is an int subclass --
-    True must not resolve to 1) and > 0. Any failure -- no repo, no cache dir,
-    unreadable, malformed JSON, neither key -- returns None, never a default.
+    Returns the parsed object so callers can take more than one fact from a
+    single read -- the context length and the model family both come from
+    here, and reading twice would double the timeout exposure below for a
+    file that is already open.
+
+    Any failure -- no repo, no cache dir, unreadable, malformed JSON --
+    returns None, never a default.
     """
     if not repo:
         return None
@@ -430,30 +448,63 @@ def _read_hf_cache_context(repo: str | None) -> int | None:
             cfg = json.load(f)
     except (OSError, ValueError):
         return None
+    return cfg if isinstance(cfg, dict) else None
+
+
+def _config_scopes(cfg: dict | None):
+    """cfg, then its text_config -- the two places a fact may live.
+
+    Multimodal repos (Qwen3.6 / gemma-4 / Qwen3-VL) nest the language-model
+    fields under ``text_config``; top level wins when both are present.
+    """
+    if not isinstance(cfg, dict):
+        return
     for scope in (cfg, cfg.get("text_config") or {}):
-        if not isinstance(scope, dict):
-            continue
+        if isinstance(scope, dict):
+            yield scope
+
+
+def _config_context(cfg: dict | None) -> int | None:
+    """``max_position_embeddings`` from a parsed config.json, or None.
+
+    Mirrors llitmus-eval's resolve_context_length() (litmus_common.py) so the
+    two repos agree: a value only counts if it's an int (bool is an int
+    subclass -- True must not resolve to 1) and > 0.
+    """
+    for scope in _config_scopes(cfg):
         v = scope.get("max_position_embeddings")
         if isinstance(v, int) and not isinstance(v, bool) and v > 0:
             return v
     return None
 
 
-def _hf_cache_context(repo: str | None) -> int | None:
-    """_read_hf_cache_context() bounded by HF_CACHE_READ_TIMEOUT.
+def _config_model_type(cfg: dict | None) -> str | None:
+    """``model_type`` from a parsed config.json ("qwen3", "llama", "gemma3"),
+    or None when absent or not a string. Used only to check the token
+    estimator's calibration against the model actually being served --
+    never to route."""
+    for scope in _config_scopes(cfg):
+        v = scope.get("model_type")
+        if isinstance(v, str) and v.strip():
+            return v.strip().lower()
+    return None
+
+
+def _hf_cache_config(repo: str | None) -> dict | None:
+    """_read_hf_cache_config() bounded by HF_CACHE_READ_TIMEOUT.
 
     A hang is treated exactly like a cache miss: return None and let the
     caller fall through the precedence chain. The read runs in a worker
     thread because a thread stuck in a syscall cannot be killed -- so it is
     abandoned rather than joined, and daemon=True keeps the abandoned thread
     from holding up interpreter exit. At most one such thread can leak per
-    process, since _cached_hf_local_context() calls this once.
+    process, since _cached_hf_local_config() calls this once.
     """
-    box: dict[str, int | None] = {}
+    box: dict[str, dict | None] = {}
 
     def _worker() -> None:
         try:
-            box["v"] = _read_hf_cache_context(repo)
+            box["v"] = _read_hf_cache_config(repo)
         except Exception:  # noqa: BLE001 - a miss, never a crashed request
             pass
 
@@ -467,15 +518,27 @@ def _hf_cache_context(repo: str | None) -> int | None:
     return box.get("v")
 
 
-def _cached_hf_local_context() -> int | None:
-    """_hf_cache_context() for LOCAL_MODELS_ORDER[0], computed once per
+def _cached_hf_local_config() -> dict | None:
+    """_hf_cache_config() for LOCAL_MODELS_ORDER[0], computed once per
     process rather than per call. effective_local_context() sits on the hot
     routing path, so this must not stat the filesystem on every request."""
-    global _hf_derived_context
-    if _hf_derived_context is _HF_CONTEXT_UNSET:
+    global _hf_derived_config
+    if _hf_derived_config is _HF_CONFIG_UNSET:
         repo = LOCAL_MODELS_ORDER[0] if LOCAL_MODELS_ORDER else None
-        _hf_derived_context = _hf_cache_context(repo)
-    return _hf_derived_context
+        _hf_derived_config = _hf_cache_config(repo)
+    return _hf_derived_config
+
+
+def _cached_hf_local_context() -> int | None:
+    """Native context length of the served model, from the cached config."""
+    return _config_context(_cached_hf_local_config())
+
+
+def local_model_family() -> str | None:
+    """``model_type`` of the served model, or None when it can't be
+    determined -- no repo configured, nothing in the HF cache, or a config
+    without the key. None means unknown, never "no mismatch"."""
+    return _config_model_type(_cached_hf_local_config())
 
 
 def effective_local_context() -> int:
@@ -593,6 +656,11 @@ def auth_failed(authorization: str | None) -> Response | None:
 # corpus variance the divisor was fitted to.
 ESTIMATE_DIVISOR_REF_TOKENIZER = "mlx-community/Qwen3-14B-4bit"
 
+# config.json ``model_type`` of the tokenizer above. Compared against the
+# served model's own model_type to detect that the estimator is calibrated
+# for a family the router is no longer serving -- see divisor_family_match().
+ESTIMATE_DIVISOR_REF_MODEL_TYPE = "qwen3"
+
 # Chars-per-token divisor for estimate_prompt_tokens. Calibrated against
 # ESTIMATE_DIVISOR_REF_TOKENIZER over the 15-case main replay corpus
 # (cases/main_replay.jsonl) on 2026-07-29 by
@@ -605,12 +673,49 @@ ESTIMATE_DIVISOR_REF_TOKENIZER = "mlx-community/Qwen3-14B-4bit"
 # case ever seen would underestimate. The margin buys headroom on the cheap
 # side of the asymmetry documented in estimate_prompt_tokens.
 #
-# Recalibrate if the corpus changes OR the local model family changes; the
-# standing property test (tests/test_router_divisor_property.py) fails loudly
-# if the pinned value ever underestimates on the corpus. The value close to
-# Qwen3.6's version number is pure coincidence — this is an empirical
-# chars-per-token ratio, not model-derived.
+# Recalibrate if the corpus changes OR the local model family changes. Note
+# that BOTH the corpus and the guard live in the companion llitmus-eval repo,
+# not here -- this interpreter has no transformers/huggingface_hub and must
+# not gain them, so the evidence for this number is necessarily out-of-tree:
+#
+#   llitmus-eval/scripts/calibrate_router_divisor.py   recomputes the value
+#   llitmus-eval/tests/test_router_divisor_property.py fails if it underestimates
+#
+# Because that repo has no CI, the only in-tree tripwire is
+# test_estimate_divisor_is_pinned in test_routing.py: it asserts the literal
+# below, so editing it here alone fails a test that names the recalibration
+# path. That is a "you changed it deliberately" check, NOT a correctness one --
+# only the property test above can tell you the new value is safe.
+#
+# The value close to Qwen3.6's version number is pure coincidence — this is an
+# empirical chars-per-token ratio, not model-derived.
 ESTIMATE_CHARS_PER_TOKEN = 3.5
+
+
+def divisor_family_match() -> bool | None:
+    """Is the token estimator calibrated for the model actually being served?
+
+    Closes an asymmetry this router would otherwise carry: the right side of
+    the context gate (effective_local_context) follows the served model
+    automatically, while the left side (ESTIMATE_CHARS_PER_TOKEN) is pinned by
+    hand to one tokenizer family. Serve a llama or gemma and the limit tracks
+    reality while the estimate silently does not -- cross-family segmentation
+    variance is far larger than the corpus variance the divisor was fitted to.
+
+    Reports only; never routes. An estimate that is wrong by a family-sized
+    factor is a recalibration job, not something to paper over at request time
+    by inflating the divisor or forcing traffic to cloud.
+
+    Tri-state on purpose:
+        True   families agree
+        False  they do not -- recalibrate (see ESTIMATE_CHARS_PER_TOKEN)
+        None   undetermined: no repo configured, nothing in the HF cache, or a
+               config.json without model_type. Never report None as agreement.
+    """
+    family = local_model_family()
+    if family is None:
+        return None
+    return family == ESTIMATE_DIVISOR_REF_MODEL_TYPE
 
 
 def _count_prompt_chars(body: dict[str, Any]) -> int:
@@ -1405,6 +1510,15 @@ async def health():
                                   else "probe" if _derived_local_context is not None
                                   else "hf-cache" if _cached_hf_local_context() is not None
                                   else "legacy-default"),
+        # The other side of the same gate: which model the prompt-size
+        # estimate is calibrated for, versus which one is actually served.
+        "estimate_divisor": {
+            "chars_per_token": ESTIMATE_CHARS_PER_TOKEN,
+            "ref_tokenizer": ESTIMATE_DIVISOR_REF_TOKENIZER,
+            "ref_model_type": ESTIMATE_DIVISOR_REF_MODEL_TYPE,
+            "served_model_type": local_model_family(),
+            "family_match": divisor_family_match(),
+        },
         "local_connect_timeout": LOCAL_CONNECT_TIMEOUT,
         "vision": {
             "enabled": bool(VISION_SHIM_MODEL or VISION_CLOUD_MODEL),
