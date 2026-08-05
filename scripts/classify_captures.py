@@ -46,17 +46,21 @@ def system_opener(body, n=90):
 def scan(d):
     rows = []
     for f in sorted(pathlib.Path(d).glob("req-*.json")):
+        # Everything that touches one capture stays inside the handler. The
+        # contract is per-file isolation, not "JSON parsing is isolated": a
+        # capture with a non-string `text` value raises TypeError inside
+        # classify()/system_opener(), and one bad file must not end the batch.
         try:
             body = json.loads(f.read_text())
             if not isinstance(body, dict):
                 # A JSON array or scalar parses fine but has no .get(), so it
-                # would raise inside classify() and kill the batch this handler
-                # exists to keep alive.
+                # would raise inside classify().
                 raise ValueError(f"capture root is {type(body).__name__}, not an object")
+            row = (f.name, classify(body).cls, system_opener(body))
         except Exception as e:  # noqa: BLE001 - report, don't abort the batch
-            rows.append((f.name, "PARSE-ERR", str(e)[:60]))
+            rows.append((f.name, "PARSE-ERR", f"{type(e).__name__}: {e}"[:60]))
             continue
-        rows.append((f.name, classify(body).cls, system_opener(body)))
+        rows.append(row)
     return rows
 
 
@@ -69,7 +73,10 @@ def main(dirs):
         counts = Counter(r[1] for r in rows)
         print(f"\n=== {d}  ({len(rows)} requests) ===")
         for name, cls, opener in rows:
-            flag = "  <-- UNKNOWN (fingerprint miss)" if cls == "unknown" else ""
+            # Not necessarily a fingerprint miss: classify() also returns
+            # "unknown" when a fingerprint matched but its tool-count condition
+            # did not (e.g. a main fingerprint with zero tools).
+            flag = "  <-- UNKNOWN" if cls == "unknown" else ""
             print(f"  {cls:11} {name}{flag}")
             print(f"              opener: {opener!r}")
         print(f"  totals: {dict(counts)}")
