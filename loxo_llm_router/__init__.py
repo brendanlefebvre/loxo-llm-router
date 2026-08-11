@@ -112,7 +112,7 @@ from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import cache as cache_mod
-from .classify import classify
+from .classify import classify, normalize_declared_class
 from .config import Config, VirtualModel, load_config
 from .ledger import (AdequacyLedger, Observation, SpendTracker, StreamScan,
                      resolve_adequacy_ledger, resolve_spend_ledger)
@@ -1324,6 +1324,7 @@ async def chat_completions(
     x_loxo_quality: str | None = Header(default=None),
     x_loxo_vision: str | None = Header(default=None),
     x_loxo_session_id: str | None = Header(default=None),
+    x_opencode_class: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ):
     denied = auth_failed(authorization)
@@ -1338,6 +1339,11 @@ async def chat_completions(
     session_id = resolve_session_id(x_loxo_session_id, body, requested_model)
 
     klass = classify(body)  # A1: observe-only, before any body rewrite
+    # A harness that already knows the request's purpose can DECLARE it via
+    # X-Opencode-Class, sparing the classifier its guess. We still keep the
+    # classifier's own verdict (klass.cls) so its accuracy stays measurable;
+    # `declared_class` is the authoritative label the dial prefers when set.
+    declared_class = normalize_declared_class(x_opencode_class)
 
     requested_vm = resolve_virtual(body.get("model", ""))
     base_url, model_to_send, reason = pick_target(body, x_loxo_quality)
@@ -1415,6 +1421,7 @@ async def chat_completions(
     # A2: one observation per request, filled by forward() as the outcome lands.
     obs = Observation(
         cls=klass.cls, classifier_version=klass.version,
+        declared_class=declared_class,
         requested_model=requested_model,
         route="cloud" if is_cloud else "local",
         served_model=model_to_send, reason=reason, stream=stream,

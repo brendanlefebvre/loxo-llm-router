@@ -25,13 +25,22 @@ def test_entry_has_exact_spec_schema():
                     "prompt_tokens_details": {"cached_tokens": 80},
                     "completion_tokens_details": {"reasoning_tokens": 5}})
     e = o.to_entry()
-    assert set(e) == {"ts", "class", "classifier_version", "requested_model", "route",
-                      "served_model", "reason", "stream", "status", "latency_ms",
+    assert set(e) == {"ts", "class", "declared_class", "classifier_version", "requested_model",
+                      "route", "served_model", "reason", "stream", "status", "latency_ms",
                       "ttfb_ms", "fallback_fired", "finish_reason", "had_tool_calls",
                       "tool_calls_valid_json", "tokens", "usd", "session_id", "shadow"}
     assert e["class"] == "main"
+    assert e["declared_class"] is None  # absent unless a harness declared one
     assert e["shadow"] is False
     assert e["tokens"] == {"prompt": 100, "completion": 20, "reasoning": 5, "cached": 80}
+
+
+def test_entry_carries_declared_class_when_set():
+    """A harness-declared class rides alongside the classifier's own verdict, so
+    the dial can prefer the authoritative label without losing classifier health."""
+    e = _obs(cls="main", declared_class="compaction").to_entry()
+    assert e["class"] == "main"              # classifier verdict preserved
+    assert e["declared_class"] == "compaction"  # authoritative override recorded
 
 
 def test_entry_tolerates_missing_usage():

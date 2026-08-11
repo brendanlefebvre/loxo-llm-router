@@ -198,13 +198,14 @@ from dataclasses import dataclass, field  # noqa: E402
 class Observation:
     """Filled across a request's lifetime: routing fields at dispatch,
     outcome fields when the response completes."""
-    cls: str
+    cls: str                        # the classifier's OWN verdict — always preserved, so classifier health stays measurable
     classifier_version: int
     requested_model: str
     route: str                      # "local" | "cloud"
     served_model: str
     reason: str
     stream: bool
+    declared_class: str | None = None  # authoritative class from the X-Opencode-Class header, when the harness supplied one; downstream prefers this over `cls`
     status: int | None = None
     latency_ms: int | None = None
     ttfb_ms: int | None = None
@@ -224,6 +225,7 @@ class Observation:
         return {
             "ts": datetime.now(timezone.utc).isoformat(),
             "class": self.cls,
+            "declared_class": self.declared_class,
             "classifier_version": self.classifier_version,
             "requested_model": self.requested_model,
             "route": self.route,
