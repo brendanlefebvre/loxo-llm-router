@@ -36,6 +36,11 @@ Faithful replay except three overrides, each to make the comparison clean:
 Requires loxo importable (for classify): run inside the loxo venv, or
 `pip install -e .` in loxo-llm-router first. loxo must be RUNNING and
 reachable at --loxo-url (both local and cloud backends configured).
+
+Every replay request carries the X-Loxo-Replay header, which tells a
+capture-enabled router to skip capturing it -- without this a replay run
+against a live-capturing server feeds on its own output, doubling the
+capture corpus with stream:false/temperature:0.0 artifacts every pass.
 """
 from __future__ import annotations
 
@@ -62,7 +67,12 @@ def _post(url: str, body: dict, timeout: float):
     """POST a chat-completion body; return (elapsed_s, {ok, response|error})."""
     data = json.dumps(body).encode()
     req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+        url,
+        data=data,
+        # X-Loxo-Replay tells a capture-enabled router NOT to capture this
+        # request -- otherwise the replay feeds on its own output.
+        headers={"Content-Type": "application/json", "X-Loxo-Replay": "1"},
+        method="POST",
     )
     t0 = time.monotonic()
     try:

@@ -32,6 +32,22 @@ def test_capture_writes_owner_only_perms(tmp_path, monkeypatch):
     assert mode == 0o600
 
 
+def test_capture_skipped_for_replay(tmp_path, monkeypatch):
+    """Replay traffic (X-Loxo-Replay) is never captured, so a replay run against
+    a capture-enabled server can't feed on its own output (stream:false/temp:0.0
+    artifacts). The endpoint passes replay=bool(x_loxo_replay) to this call."""
+    monkeypatch.setattr(R, "LOXO_CAPTURE_DIR", str(tmp_path / "caps"))
+    R._capture_request(b'{"model": "loxo/deep", "stream": false, "temperature": 0.0}', replay=True)
+    assert not list((tmp_path / "caps").rglob("req-*.json"))
+
+
+def test_capture_writes_when_not_replay(tmp_path, monkeypatch):
+    """Guard is off by default: ordinary (non-replay) traffic is still captured."""
+    monkeypatch.setattr(R, "LOXO_CAPTURE_DIR", str(tmp_path / "caps"))
+    R._capture_request(b'{"model": "loxo/auto", "messages": []}', replay=False)
+    assert len(list((tmp_path / "caps").glob("req-*.json"))) == 1
+
+
 def test_capture_failure_never_raises(tmp_path, monkeypatch):
     blocked = tmp_path / "file-not-dir"
     blocked.write_text("occupied")
