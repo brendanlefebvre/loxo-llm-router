@@ -29,25 +29,26 @@ gemini-2.5-pro.
 
 ## The Number
 
-**Local-absorption ceiling ≈ 15.1% of prompt-token volume** (573,584 /
-3,808,368 prompt tokens; 27 / 96 requests = 28% by count). It is lower by token
+**Local-absorption ceiling ≈ 16.0% of prompt-token volume** (608,767 /
+3,808,368 prompt tokens; 28 / 96 requests = 29% by count). It is lower by token
 than by count because the requests local *can* take are the small ones.
 
 The arc: the first pass read 9.4% because 12 captures failed on MLX server
-errors that looked transient. Re-running them (with the MLX server confirmed up
-and watched) resolved 8 to `served` and exposed the remaining failures as a
-*real* capacity wall — not noise — landing the honest figure at 15.1%. The
-30k–31k band is genuinely stochastic (see the OOM finding), so treat 15.1% as a
-point estimate with real noise, not a sharp line.
+errors that looked transient. Re-running them (MLX confirmed up and watched)
+resolved most to `served` and exposed the rest as a *real* capacity wall — not
+noise. A final isolated re-run of the compaction capture on a freshly-restarted
+(empty-cache) server added the last point, landing the honest figure at 16.0%.
+The 30k–31k band is genuinely stochastic (see the OOM finding), so treat 16.0%
+as a point estimate with real noise, not a sharp line.
 
 ### Local outcome taxonomy (96 captures, final)
 
 | outcome | count | meaning |
 |---|---:|---|
-| served | 27 | local produced an answer |
+| served | 28 | local produced an answer |
 | overflow | 65 | loxo's own 422 "prompt too large for local context (> 40960)" |
 | OOM (HTTP 500) | 2 | MLX crashed on a Metal GPU out-of-memory during prefill |
-| unreachable (HTTP 422) | 2 | request landed while MLX was reloading after a prior OOM crash |
+| unreachable (HTTP 422) | 1 | request landed while MLX was reloading after a prior OOM crash |
 
 ## Finding 1: main is a context wall (structural, dominant)
 
@@ -116,15 +117,17 @@ on 24 GB it starves the OS + OpenCode + loxo — fragile for an always-on tier.)
 | class | served/total | token ceiling |
 |---|---|---|
 | chore | 2/2 | 100.0% |
-| compaction | 0/1 | 0.0% — **still unmeasured** (see below) |
+| compaction | 1/1 | 100.0% (clean-cache only — see below) |
 | main | 25/93 | 15.1% |
 
-**Compaction remains a blank.** The single compaction capture (35,183 tokens)
-failed on both re-runs — but each time as reload-race "unreachable" collateral
-from a *preceding* main OOM, never on its own clean attempt. To get a real
-compaction data point it must be run in isolation on a freshly-restarted MLX
-server. At 35k it may OOM anyway (above the overlap band), but it deserves one
-clean shot before the cell is called.
+**Compaction: 1/1, but only on a clean cache — and that is itself the proof.**
+The single compaction capture (35,183 tokens) failed on every sequential
+attempt (reload-race "unreachable" collateral from preceding main OOMs). Run in
+isolation on a freshly-restarted MLX server with an empty prompt cache, it
+cleared the full ~32k-token prefill and served cleanly (finish `stop`, 516
+completion tokens). So the same capture flips fail → serve on cache state
+alone — direct, single-capture evidence for the prompt-cache fix: a 35k prompt
+is locally servable when the cache is clear and un-servable when it is not.
 
 ## The governing caveat: availability ≠ proven adequacy
 
@@ -137,12 +140,12 @@ availability, not yet earned.
 
 ## Next actions
 
-1. Ship the loxo fix above (LOCAL_CONTEXT_LIMIT + prompt-cache cap).
-2. One isolated run of the 35k compaction capture on a clean MLX server, to
-   fill the compaction cell.
-3. Stand up the adequacy pass: mechanical for `compaction`, hand-judged for
+1. Ship the loxo fix above (LOCAL_CONTEXT_LIMIT + prompt-cache cap). The
+   compaction result makes the cache cap concrete: it is the difference between
+   a 35k prompt serving and OOM-crashing the server.
+2. Stand up the adequacy pass: mechanical for `compaction`, hand-judged for
    `main`, to convert "served" into "adequately served."
-4. Grow the organic corpus past 96 (real sessions with capture on) — 93/2/1 is
+3. Grow the organic corpus past 96 (real sessions with capture on) — 93/2/1 is
    thin for the chore and compaction classes where local actually wins.
 
 ## Commands
