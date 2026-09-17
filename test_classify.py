@@ -6,7 +6,12 @@ main turns carry the OpenCode agent system prompt (two variants — OpenCode
 swaps prompts by target model family) plus a tool inventory.
 """
 
-from loxo_llm_router.classify import CLASSIFIER_VERSION, Classification, classify
+from loxo_llm_router.classify import (
+    CLASSIFIER_VERSION,
+    Classification,
+    classify,
+    normalize_declared_class,
+)
 
 
 def _body(system=None, tools=0, messages=1, stream=True):
@@ -131,3 +136,23 @@ def test_compaction_rule_order():
 def test_version_bumped_everywhere():
     assert CLASSIFIER_VERSION == 2
     assert classify(_body(system=None)).version == 2
+
+
+# --- normalize_declared_class (X-Opencode-Class header validation) ------------
+
+def test_declared_class_accepts_known_classes():
+    assert normalize_declared_class("main") == "main"
+    assert normalize_declared_class("chore") == "chore"
+    assert normalize_declared_class("compaction") == "compaction"
+
+
+def test_declared_class_normalizes_case_and_whitespace():
+    assert normalize_declared_class("  COMPACTION ") == "compaction"
+
+
+def test_declared_class_rejects_unknown_and_junk():
+    # unknown is a classifier fallback, never a declarable value
+    assert normalize_declared_class("unknown") is None
+    assert normalize_declared_class("main; drop table") is None
+    assert normalize_declared_class("") is None
+    assert normalize_declared_class(None) is None

@@ -23,6 +23,23 @@ from typing import Any
 
 CLASSIFIER_VERSION = 2
 
+# Classes a harness may legitimately DECLARE via the X-Opencode-Class header.
+# `unknown` is a classifier fallback, never something a caller declares — an
+# untrusted header value outside this set is ignored, not recorded.
+DECLARABLE_CLASSES = frozenset({"main", "chore", "compaction"})
+
+
+def normalize_declared_class(header: str | None) -> str | None:
+    """Validate an X-Opencode-Class header value (untrusted input).
+
+    Returns the normalized class when the caller declared a known one, else
+    None — junk, unknown, or an absent header is ignored, never recorded.
+    """
+    if not isinstance(header, str):  # matches resolve_session_id: tolerate odd shapes
+        return None
+    value = header.strip().lower() or None
+    return value if value in DECLARABLE_CLASSES else None
+
 TITLE_FINGERPRINTS = (
     "You are a title generator",
 )
