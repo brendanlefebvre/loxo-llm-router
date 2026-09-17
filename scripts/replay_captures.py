@@ -24,8 +24,13 @@ straight out of the file.
 
 Deliberately SEQUENTIAL -- one in-flight request at a time -- so a big local
 model can't stack KV caches and OOM the machine (learned the hard way on a
-24 GB Mac). Resumable: captures already present in --out are skipped, so a
-crash mid-run just re-runs the remainder.
+24 GB Mac). Resumable: captures with a terminal row in --out (a server verdict,
+success or HTTP error) are skipped; transport-error rows (server down, timeout)
+are dropped and those captures retried, so a crash or outage mid-run just
+re-runs the remainder.
+
+If the router has ROUTER_TOKEN set, pass --token (or export ROUTER_TOKEN);
+otherwise every replay 401s.
 
 Faithful replay except three overrides, each to make the comparison clean:
   - model       -> loxo/local, then loxo/deep   (the whole point)
@@ -46,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import sys
 import time
@@ -63,17 +69,26 @@ LOCAL_TIER = "loxo/local"
 DEEP_TIER = "loxo/deep"
 
 
-def _post(url: str, body: dict, timeout: float):
-    """POST a chat-completion body; return (elapsed_s, {ok, response|error})."""
-    data = json.dumps(body).encode()
-    req = urllib.request.Request(
-        url,
-        data=data,
+def _build_request(url: str, body: dict, token: str = "") -> urllib.request.Request:
+    """Build the replay POST: JSON body, replay marker, optional bearer token."""
+    headers = {
+        "Content-Type": "application/json",
         # X-Loxo-Replay tells a capture-enabled router NOT to capture this
         # request -- otherwise the replay feeds on its own output.
-        headers={"Content-Type": "application/json", "X-Loxo-Replay": "1"},
-        method="POST",
+        "X-Loxo-Replay": "1",
+    }
+    if token:
+        # Without this, a ROUTER_TOKEN-enabled router 401s every capture in
+        # seconds and the run looks "complete" with zero data.
+        headers["Authorization"] = f"Bearer {token}"
+    return urllib.request.Request(
+        url, data=json.dumps(body).encode(), headers=headers, method="POST",
     )
+
+
+def _post(url: str, body: dict, timeout: float, token: str = ""):
+    """POST a chat-completion body; return (elapsed_s, {ok, response|error})."""
+    req = _build_request(url, body, token)
     t0 = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -103,31 +118,64 @@ def _extract(result: dict) -> dict:
     }
 
 
-def _replay_one(body: dict, url: str, temperature: float, keep_temp: bool, timeout: float) -> dict:
+def _replay_one(body: dict, url: str, temperature: float, keep_temp: bool,
+                timeout: float, token: str = "") -> dict:
     """Run one capture through both tiers; return {"local": rec, "deep": rec}."""
     out = {}
     for tier_key, tier_model in (("local", LOCAL_TIER), ("deep", DEEP_TIER)):
         sent = dict(body)
         sent["model"] = tier_model
         sent["stream"] = False
+        # stream:false + stream_options is OpenAI-spec-invalid; a strict
+        # backend's 400 would be misread as a tier failure.
+        sent.pop("stream_options", None)
         if not keep_temp:
             sent["temperature"] = temperature
-        elapsed, result = _post(url, sent, timeout)
+        elapsed, result = _post(url, sent, timeout, token)
         rec = _extract(result)
         rec["latency_s"] = round(elapsed, 2)
         out[tier_key] = rec
     return out
 
 
-def _already_done(out_path: pathlib.Path) -> set:
-    """Capture filenames already recorded in --out, for resume."""
-    done = set()
-    if out_path.exists():
-        for line in out_path.read_text().splitlines():
-            try:
-                done.add(json.loads(line)["capture"])
-            except Exception:  # noqa: BLE001 - a half-written final line shouldn't break resume
-                pass
+def _tier_terminal(rec) -> bool:
+    """A tier record is terminal when the server rendered a verdict: success,
+    or an HTTP error (422 overflow, 500 OOM). A transport error (connection
+    refused, timeout -- recorded as the exception's type name) means the server
+    never judged the request, so the capture must be retried on resume."""
+    if not isinstance(rec, dict):
+        return False
+    return bool(rec.get("ok")) or str(rec.get("error", "")).startswith("HTTP ")
+
+
+def _row_terminal(row: dict) -> bool:
+    if "error" in row:  # row-level error: deterministic capture-parse failure
+        return True
+    return _tier_terminal(row.get("local")) and _tier_terminal(row.get("deep"))
+
+
+def _compact_for_resume(out_path: pathlib.Path) -> set:
+    """Return capture filenames with a terminal row in --out; rewrite the file
+    keeping only those rows so retried captures never appear twice.
+
+    Counting EVERY row as done made resume useless after an outage: a run
+    against a down router appended 96 transport-error rows in seconds, and the
+    rerun said "nothing to do" -- recovery used to be manual grep surgery.
+    Half-written final lines (crash mid-write) are dropped and retried too."""
+    if not out_path.exists():
+        return set()
+    kept, done = [], set()
+    for line in out_path.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except Exception:  # noqa: BLE001 - half-written final line: retry that capture
+            continue
+        if _row_terminal(row):
+            kept.append(line)
+            done.add(row["capture"])
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp.write_text("".join(line + "\n" for line in kept))
+    tmp.replace(out_path)
     return done
 
 
@@ -145,6 +193,9 @@ def main() -> None:
                     help="leave the captured temperature untouched instead of forcing --temperature")
     ap.add_argument("--timeout", type=float, default=600.0,
                     help="per-request timeout seconds (default: 600)")
+    ap.add_argument("--token", default=os.environ.get("ROUTER_TOKEN", ""),
+                    help="router bearer token (default: $ROUTER_TOKEN; required "
+                         "when the router has ROUTER_TOKEN set)")
     ap.add_argument("--limit", type=int, default=0,
                     help="only replay the first N pending captures (0 = all; use for a smoke test)")
     args = ap.parse_args()
@@ -154,9 +205,10 @@ def main() -> None:
         sys.exit(f"no req-*.json found in {args.captures_dir}")
 
     out_path = pathlib.Path(args.out)
-    done = _already_done(out_path)
+    done = _compact_for_resume(out_path)
     if done:
-        print(f"resuming: {len(done)} already in {out_path}, skipping those", file=sys.stderr)
+        print(f"resuming: {len(done)} terminal in {out_path}, skipping those "
+              "(transport-error rows dropped for retry)", file=sys.stderr)
 
     todo = [f for f in captures if f.name not in done]
     if args.limit:
@@ -174,7 +226,7 @@ def main() -> None:
                     raise ValueError(f"capture root is {type(body).__name__}, not an object")
                 cls = classify(body).cls
                 tiers = _replay_one(body, args.loxo_url, args.temperature,
-                                    args.keep_temperature, args.timeout)
+                                    args.keep_temperature, args.timeout, args.token)
                 row = {"capture": f.name, "cls": cls, **tiers}
             except Exception as e:  # noqa: BLE001 - one bad capture must not end the batch
                 row = {"capture": f.name, "error": type(e).__name__, "detail": str(e)[:2000]}
