@@ -612,15 +612,20 @@ LOXO_CAPTURE_DIR = os.environ.get("LOXO_CAPTURE_DIR", "")
 _capture_seq = itertools.count()
 
 
-def _capture_request(raw: bytes) -> None:
+def _capture_request(raw: bytes, replay: bool = False) -> None:
     """Dump one raw request body to LOXO_CAPTURE_DIR; never break the request.
 
     Bodies contain full raw operator prompts, so the file must be owner-only
     (0600) from the moment it exists — never briefly world-readable under the
     umask. Written to a temp file with 0600 perms, then atomically renamed
     into place.
+
+    Replay traffic (X-Loxo-Replay header, set by scripts/replay_captures.py)
+    is never captured: capturing it would let a replay run against a
+    capture-enabled server feed on its own output, doubling the corpus with
+    stream:false/temperature:0.0 artifacts on every pass.
     """
-    if not LOXO_CAPTURE_DIR:
+    if replay or not LOXO_CAPTURE_DIR:
         return
     try:
         d = pathlib.Path(LOXO_CAPTURE_DIR)
@@ -1327,6 +1332,7 @@ async def chat_completions(
     x_loxo_quality: str | None = Header(default=None),
     x_loxo_vision: str | None = Header(default=None),
     x_loxo_session_id: str | None = Header(default=None),
+    x_loxo_replay: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ):
     denied = auth_failed(authorization)
@@ -1334,7 +1340,7 @@ async def chat_completions(
         return denied
 
     body_bytes = await request.body()
-    _capture_request(body_bytes)  # opt-in; pre-parse, pre-rewrite shape
+    _capture_request(body_bytes, replay=bool(x_loxo_replay))  # opt-in; skipped for replay (self-feed guard)
     body = json.loads(body_bytes)
     requested_model = body.get("model", "")
     stream = bool(body.get("stream", False))
