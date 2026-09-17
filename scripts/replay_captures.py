@@ -170,9 +170,17 @@ def _compact_for_resume(out_path: pathlib.Path) -> set:
             row = json.loads(line)
         except Exception:  # noqa: BLE001 - half-written final line: retry that capture
             continue
+        # Valid JSON of the wrong shape (non-dict, or no usable capture name)
+        # is dropped for retry like a half-written line -- one such row must
+        # not abort resume for the whole run.
+        if not isinstance(row, dict):
+            continue
+        capture = row.get("capture")
+        if not isinstance(capture, str) or not capture:
+            continue
         if _row_terminal(row):
             kept.append(line)
-            done.add(row["capture"])
+            done.add(capture)
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
     tmp.write_text("".join(line + "\n" for line in kept))
     tmp.replace(out_path)

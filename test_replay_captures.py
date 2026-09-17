@@ -73,6 +73,24 @@ def test_resume_missing_file_is_empty(tmp_path):
     assert rc._compact_for_resume(tmp_path / "absent.jsonl") == set()
 
 
+def test_resume_skips_valid_json_rows_of_wrong_shape(tmp_path):
+    """A row that parses as JSON but isn't a dict (or lacks a usable 'capture')
+    must be dropped for retry, not crash resume — one such line previously
+    aborted the whole run with AttributeError/KeyError."""
+    out = tmp_path / "r.jsonl"
+    good = {"capture": "a.json", "cls": "main", "local": {"ok": True}, "deep": {"ok": True}}
+    out.write_text(
+        json.dumps(good) + "\n"
+        + "[1, 2, 3]\n"                                   # valid JSON, not a dict
+        + "42\n"                                          # valid JSON scalar
+        + json.dumps({"cls": "main", "error": "x"}) + "\n"  # dict without capture
+        + json.dumps({"capture": "", "error": "x"}) + "\n"  # empty capture name
+    )
+    done = rc._compact_for_resume(out)
+    assert done == {"a.json"}
+    assert [json.loads(line)["capture"] for line in out.read_text().splitlines()] == ["a.json"]
+
+
 # --- replay body hygiene ------------------------------------------------------
 
 def test_replay_one_drops_stream_options(monkeypatch):
