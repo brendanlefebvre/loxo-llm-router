@@ -645,6 +645,19 @@ def _capture_request(raw: bytes, replay: bool = False) -> None:
         log(f"[router] capture failed ({e}); request unaffected")
 
 
+_REPLAY_FALSE = frozenset({"", "0", "false", "no", "off"})
+
+
+def _replay_requested(header) -> bool:
+    """Parse X-Loxo-Replay (untrusted input). Explicit false spellings must read
+    as NOT a replay — bool(header) would treat 'X-Loxo-Replay: 0' from a client
+    or proxy as replay-true and silently drop organic traffic from the capture
+    corpus. Non-string shapes (absent header, odd values) are not a replay."""
+    if not isinstance(header, str):
+        return False
+    return header.strip().lower() not in _REPLAY_FALSE
+
+
 def record(obs: Observation) -> None:
     """Single finalization choke point: fan a completed obs out to every sink.
 
@@ -1341,7 +1354,8 @@ async def chat_completions(
         return denied
 
     body_bytes = await request.body()
-    _capture_request(body_bytes, replay=bool(x_loxo_replay))  # opt-in; skipped for replay (self-feed guard)
+    is_replay = _replay_requested(x_loxo_replay)
+    _capture_request(body_bytes, replay=is_replay)  # opt-in; skipped for replay (self-feed guard)
     body = json.loads(body_bytes)
     requested_model = body.get("model", "")
     stream = bool(body.get("stream", False))
@@ -1350,8 +1364,9 @@ async def chat_completions(
     klass = classify(body)  # A1: observe-only, before any body rewrite
     # A harness that already knows the request's purpose can DECLARE it via
     # X-Opencode-Class, sparing the classifier its guess. We still keep the
-    # classifier's own verdict (klass.cls) so its accuracy stays measurable;
-    # `declared_class` is the authoritative label the dial prefers when set.
+    # classifier's own verdict (klass.cls) so its accuracy stays measurable.
+    # `declared_class` is recorded observe-only for now: the future dial is its
+    # intended consumer; nothing prefers it over `cls` yet.
     declared_class = normalize_declared_class(x_opencode_class)
 
     requested_vm = resolve_virtual(body.get("model", ""))
@@ -1428,7 +1443,11 @@ async def chat_completions(
     served_cloud_provider = _provider_host(CLOUD_BASE_URL) if is_cloud else None
 
     # A2: one observation per request, filled by forward() as the outcome lands.
-    obs = Observation(
+    # Replay traffic gets NO observation: it is synthetic (forced-tier,
+    # stream:false) and must not become adequacy-ledger evidence — the same
+    # self-feed guard as _capture_request, at the ledger sink. Cloud spend is
+    # still recorded inside forward(): replay requests cost real dollars.
+    obs = None if is_replay else Observation(
         cls=klass.cls, classifier_version=klass.version,
         declared_class=declared_class,
         requested_model=requested_model,

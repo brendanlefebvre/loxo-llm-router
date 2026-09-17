@@ -205,7 +205,7 @@ class Observation:
     served_model: str
     reason: str
     stream: bool
-    declared_class: str | None = None  # authoritative class from the X-Opencode-Class header, when the harness supplied one; downstream prefers this over `cls`
+    declared_class: str | None = None  # class the harness declared via X-Opencode-Class; recorded observe-only for the future dial to prefer — nothing consumes it yet
     status: int | None = None
     latency_ms: int | None = None
     ttfb_ms: int | None = None
