@@ -87,10 +87,22 @@ the base rate up, which makes Jev's miss *smaller* than it looks, not larger.
 This replay landed **21 served / 65 overflow / 10 OOM** vs. August's
 28/65/2(+1). The extra OOMs cluster in the same 30k-band and the same
 captures served in August, reconfirming path-dependence — but today's crash
-*rate* is far higher. Untested hypothesis: the MLX server currently advertises
-five models (0.6B–14B); if several stay resident in Metal wired memory, the
-14B's prefill headroom shrinks. Worth checking before the next replay; today's
-"practical" labels inherit today's memory conditions.
+*rate* is far higher. The multi-model-residency hypothesis was checked and
+**refuted**: the server log shows only the 14B ever loads (the five-model
+`/v1/models` listing is HF-cache inventory, not residency), and the weights
+are a normal 7.8 GB. The measured story instead: `footprint -p <pid>` shows
+the server's `IOAccelerator` (Metal wired) category pinned at **18 GB —
+exactly `iogpu.wired_limit_mb`** — while RSS reads a useless 1 GB. MLX's
+Metal buffer pool retains peak KV allocations, so back-to-back 30k prefills
+on a long-lived server run at the wired ceiling, where any fresh allocation
+can die. August's runs were babysat with restarts (empty cache); today's
+gated run plowed through the big captures consecutively. Consistent with the
+August finding that the compaction capture served only on a clean cache.
+Mitigation for future replays: restart MLX between heavy batches, or teach
+the health-gate to bounce the server when footprint nears the wired limit.
+Diagnostic recipe, since RSS is blind to all of this: `footprint -p <pid>`
+for Metal wired usage, the server log for actual model loads, and
+`sysctl iogpu.wired_limit_mb` for the ceiling.
 
 Also reconfirmed operationally: one OOM triggers a slow 14B reload during
 which every subsequent request 422s (`local_unreachable`) — a naive
